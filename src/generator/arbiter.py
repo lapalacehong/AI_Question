@@ -97,12 +97,14 @@ def arbiter_agent(state: AgentState) -> dict:
             result = json.loads(tool_call.function.arguments)
             parsed = ArbiterDecision(**result)
             decision = parsed.decision.strip().upper()
+            reason = parsed.reason
             feedback = parsed.feedback
         else:
             # Fallback: 模型未使用 tool_calls（如 Gemini via OpenRouter），从文本内容解析
             logger.warning("[arbiter] 模型未返回 tool_calls，尝试从文本内容解析")
             raw = msg.content or ""
             decision, feedback = _parse_text_response(raw)
+            reason = feedback[:200]
 
         # 校验 decision 是否为合法值
         if decision not in ("PASS", "RETRY", "ABORT"):
@@ -113,10 +115,11 @@ def arbiter_agent(state: AgentState) -> dict:
     except Exception as e:
         logger.error(f"[arbiter] 结构化解析失败: {e}，触发兜底 RETRY")
         decision = "RETRY"
+        reason = f"系统错误: {str(e)}"
         feedback = f"[系统错误] 仲裁解析失败，强制重试。异常: {str(e)}"
 
     new_retry = state.get("retry_count", 0) + 1
-    logger.info(f"[arbiter] 裁决={decision} | retry_count 递增至 {new_retry}")
+    logger.info(f"[arbiter] 裁决={decision} | 理由={reason[:80]} | retry_count 递增至 {new_retry}")
 
     record(
         f"arbiter_r{new_retry}", 0, elapsed, extra=decision,
@@ -125,6 +128,7 @@ def arbiter_agent(state: AgentState) -> dict:
 
     return {
         "arbiter_decision": decision,
+        "arbiter_reason": reason,
         "arbiter_feedback": feedback,
         "retry_count": new_retry,
     }

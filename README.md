@@ -12,7 +12,7 @@ flowchart TD
     PAR --> PHYS[物理验算 Agent<br/><i>模型 & 量纲检查</i>]
     MATH --> ARB[仲裁 Agent<br/><i>综合裁决</i>]
     PHYS --> ARB
-    ARB -->|PASS| PARSE[正则隔离器<br/><i>双重公式提取</i>]
+    ARB -->|PASS| PARSE[正则隔离器<br/><i>标题 + 公式 + 图片提取</i>]
     ARB -->|RETRY ≤3| GEN
     ARB -->|ABORT / 超限| END1([终止])
     PARSE --> FMT[格式化 Agent<br/><i>小模型 LaTeX 排版</i>]
@@ -32,13 +32,13 @@ flowchart TD
 
 | 节点 | 模型 | 职责 |
 |------|------|------|
-| 命题 Agent | 大模型 | 根据主题 + 难度生成完整竞赛题（题干、参考答案、评分标准） |
+| 命题 Agent | 大模型 | 根据主题 + 难度生成完整竞赛题（标题、题干、参考答案、评分标准） |
 | 数学验算 Agent | 大模型 | 验证代数 / 微积分推导、符号一致性 |
 | 物理验算 Agent | 大模型 | 验证物理模型、量纲、边界条件 |
-| 仲裁 Agent | 大模型 | 综合两份审核，输出 PASS / RETRY / ABORT 结构化裁决 |
-| 正则隔离器 | — | 提取 Block 公式 + Inline 公式，替换为占位符 |
-| 格式化 Agent | 小模型 | 对占位符文本做 LaTeX 排版（不接触数学公式） |
-| 回填器 | — | 将占位符替换回原始公式，添加编号和交叉引用 |
+| 仲裁 Agent | 大模型 | 综合两份审核，输出 PASS / RETRY / ABORT 结构化裁决（含理由） |
+| 正则隔离器 | — | 提取标题、Block 公式、Inline 公式、Figure 占位符 |
+| 格式化 Agent | 小模型 | 对占位符文本做 CPHOS LaTeX 排版（不接触数学公式） |
+| 回填器 | — | 公式回填、CPHOS 命令生成、交叉引用、插图占位 |
 
 ## 快速开始
 
@@ -58,6 +58,7 @@ copy .env.example .env          # Windows
 # 5. 运行
 uv run physics-generator --topic "刚体力学与角动量守恒"
 uv run physics-generator --topic "电磁感应" --difficulty "省级竞赛"
+uv run physics-generator --topic "电磁感应" --score 60
 uv run physics-generator --input task.json
 ```
 
@@ -80,6 +81,7 @@ uv run pytest -v
 ```
 physics-generator --topic TEXT           # 必填：物理主题
                   --difficulty TEXT       # 可选，默认 "国家集训队"
+                  --score INT            # 可选，题目总分（45-80，默认 50）
                   --input FILE           # 从 JSON 文件加载（与 --topic 互斥）
                   --log                  # 追加运行记录到 TEST_LOG.md
 ```
@@ -110,9 +112,9 @@ AI_Question/
 │   │   ├── physics_verifier.py   # 物理验算 Agent
 │   │   └── arbiter.py            # 仲裁 Agent
 │   ├── formatter/                # 格式化流水线
-│   │   ├── parser.py             # 正则隔离器（Block + Inline 公式提取）
-│   │   ├── formatter.py          # 格式化 Agent（小模型 LaTeX 排版）
-│   │   └── merger.py             # 回填器（公式回填 + 编号 + 交叉引用）
+│   │   ├── parser.py             # 正则隔离器（标题 + Block + Inline + Figure 提取）
+│   │   ├── formatter.py          # 格式化 Agent（小模型 CPHOS LaTeX 排版）
+│   │   └── merger.py             # 回填器（公式回填 + CPHOS 命令 + 插图占位）
 │   ├── graph/                    # 工作流编排
 │   │   └── workflow.py           # 纯 Python 状态机（含并行验算）
 │   └── model/                    # 数据模型
@@ -134,10 +136,11 @@ AI_Question/
 
 | 文件 | 内容 |
 |------|------|
-| `{task_id}_final.tex` | 可直接编译的 LaTeX 成品 |
+| `{task_id}_final.tex` | 可直接编译的 CPHOS LaTeX 成品 |
 | `{task_id}_draft.md` | 大模型原始草稿 |
 | `{task_id}_tagged.md` | 占位符文本（调试用） |
-| `{task_id}_log.json` | 完整运行日志（裁决、审核意见、公式数等） |
+| `{task_id}_log.json` | 完整运行日志（裁决、理由、审核意见、公式数等） |
+| `{task_id}_assets/README.md` | 插图绘制需求（仅题目含图时生成） |
 
 ## 提示词管理
 
@@ -171,16 +174,29 @@ user = load("generator", "user_prompt_initial", topic="电磁感应", difficulty
 ```mermaid
 flowchart LR
     A["LLM 输出<br/>&lt;block_math label='eq:F'&gt;<br/>F = ma<br/>&lt;/block_math&gt;"] --> B["隔离器<br/>→ ｛｛BLOCK_MATH_1｝｝"]
-    B --> C["小模型排版<br/>LaTeX 结构化"]
-    C --> D["回填器<br/>→ \\begin{equation}<br/>\\tag{1} F = ma<br/>\\end{equation}"]
+    B --> C["小模型排版<br/>CPHOS LaTeX 结构化"]
+    C --> D["回填器<br/>→ \\begin{equation}<br/>F = ma \\eqtag{1}<br/>\\end{equation}"]
 ```
 
 ## 输出文件
 
 | 文件 | 说明 |
 |---|---|
-| `output/{id}_final.tex` | 最终 LaTeX 成品 |
+| `output/{id}_final.tex` | 最终 CPHOS LaTeX 成品 |
 | `output/{id}_draft.md` | 命题 Agent 原始草稿 |
 | `output/{id}_tagged.md` | 公式隔离后的占位符文本 |
 | `output/{id}_log.json` | 完整运行日志 |
+| `output/{id}_assets/` | 插图绘制需求（仅含图时） |
+
+## CPHOS 模板对齐
+
+输出的 LaTeX 文档严格对齐 CPHOS 竞赛模板：
+
+- 文档类：`\documentclass[answer]{cphos}`
+- 题目环境：`\begin{problem}[总分]{标题}` — 标题由命题模型自动拟定
+- 公式编号：`\eqtag{N}` / `\eqtagscore{N}{分值}` + `\label{eq:N}`
+- 题干小问：`\subq{N}\label{q:N}`
+- 解答小问：`\solsubq{N}{分值}`
+- 评分标准：`\scoring`（自动插入）
+- 插图占位：输出时默认注释，完成人工绘图后取消注释即可显示
 

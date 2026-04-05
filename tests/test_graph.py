@@ -16,20 +16,23 @@ _ZERO_USAGE = UsageInfo()
 def _make_initial_state(**overrides) -> AgentState:
     base: AgentState = {
         "topic": "测试主题", "difficulty": "测试难度",
+        "total_score": 50, "title": "",
         "draft_content": "", "math_review": "", "physics_review": "",
-        "arbiter_decision": "", "arbiter_feedback": "", "retry_count": 0,
-        "formula_dict": {}, "inline_dict": {},
+        "arbiter_decision": "", "arbiter_reason": "", "arbiter_feedback": "",
+        "retry_count": 0,
+        "formula_dict": {}, "inline_dict": {}, "figure_dict": {},
         "tagged_text": "", "formatted_text": "", "final_latex": "",
+        "figure_descriptions": {},
     }
     base.update(overrides)
     return base
 
 
-def _make_tool_call_response(decision: str, feedback: str):
+def _make_tool_call_response(decision: str, feedback: str, reason: str = ""):
     """构造 OpenAI Function Calling 响应的 mock。"""
     tool_call = MagicMock()
     tool_call.function.arguments = json.dumps(
-        {"decision": decision, "feedback": feedback}
+        {"decision": decision, "reason": reason or feedback, "feedback": feedback}
     )
     resp = MagicMock()
     resp.choices = [MagicMock()]
@@ -70,7 +73,11 @@ class TestGraphRouting:
         )
 
         mock_fmt_chat.return_value = (
-            "\\section*{题目}\n{{BLOCK_MATH_1}}\n速度 {{INLINE_MATH_1}}",
+            "\\documentclass[answer]{cphos}\n\\begin{document}\n"
+            "\\begin{problem}{}\n\\begin{problemstatement}\n"
+            "题目\n\\end{problemstatement}\n"
+            "\\begin{solution}\n{{BLOCK_MATH_1}}\n速度 {{INLINE_MATH_1}}\n"
+            "\\end{solution}\n\\end{problem}\n\\end{document}",
             _ZERO_USAGE,
         )
 

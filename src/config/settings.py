@@ -64,11 +64,16 @@ INLINE_PLACEHOLDER_PREFIX: str = "{{INLINE_MATH_"
 INLINE_PLACEHOLDER_SUFFIX: str = "}}"
 
 # ============ 核心正则表达式 ============
-# Block 公式: <block_math label="eq:xxx"> ... </block_math>（跨行匹配）
+# Block 公式: <block_math label="eq:xxx" score="3"> ... </block_math>（跨行匹配，score 可选）
 # 同时兼容正确的 </block_math> 和 LLM 常见错误 \end{block_math}
-BLOCK_MATH_PATTERN: str = r'<block_math\s+label="([^"]+)">\s*(.*?)\s*(?:</block_math>|\\end\{block_math\})'
+BLOCK_MATH_PATTERN: str = r'<block_math\s+label="([^"]+)"(?:\s+score="(\d+)")?\s*>\s*(.*?)\s*(?:</block_math>|\\end\{block_math\})'
 # Inline 公式: $...$（非贪婪，排除转义的 \$）
 INLINE_MATH_PATTERN: str = r'(?<!\\)\$(.+?)(?<!\\)\$'
 
 # Fallback: 当 <block_math> 一个都匹配不到时，尝试提取 $$...$$ 作为 block 公式
 FALLBACK_BLOCK_PATTERN: str = r'\$\$\s*(.+?)\s*\$\$'
+
+# Figure: <figure label="fig:xxx" caption="描述"> 绘图说明 </figure>（跨行匹配）
+FIGURE_PATTERN: str = r'<figure\s+label="([^"]+)"\s+caption="([^"]*)"\s*>\s*(.*?)\s*</figure>'
+FIGURE_PLACEHOLDER_PREFIX: str = "{{FIGURE_"
+FIGURE_PLACEHOLDER_SUFFIX: str = "}}"

@@ -27,6 +27,7 @@ def _clean_placeholder_braces(text: str) -> str:
     """清理小模型在占位符外额外添加的花括号。"""
     text = re.sub(r'\{+(\{BLOCK_MATH_\d+\})\}+', r'{\1}', text)
     text = re.sub(r'\{+(\{INLINE_MATH_\d+\})\}+', r'{\1}', text)
+    text = re.sub(r'\{+(\{FIGURE_\d+\})\}+', r'{\1}', text)
     text = re.sub(r'\\\[\s*(\{\{BLOCK_MATH_\d+\}\})\s*\\\]', r'\1', text)
     text = re.sub(r'\$\s*(\{\{INLINE_MATH_\d+\}\})\s*\$', r'\1', text)
     return text
@@ -36,37 +37,76 @@ def _validate_placeholders(original: str, formatted: str) -> bool:
     """校验排版后的文本是否保留了所有占位符（数量和内容完全一致）。"""
     block_pat = re.compile(r'\{\{BLOCK_MATH_\d+\}\}')
     inline_pat = re.compile(r'\{\{INLINE_MATH_\d+\}\}')
+    figure_pat = re.compile(r'\{\{FIGURE_\d+\}\}')
 
     orig_blocks = sorted(block_pat.findall(original))
     fmt_blocks = sorted(block_pat.findall(formatted))
     orig_inlines = sorted(inline_pat.findall(original))
     fmt_inlines = sorted(inline_pat.findall(formatted))
+    orig_figures = sorted(figure_pat.findall(original))
+    fmt_figures = sorted(figure_pat.findall(formatted))
 
-    return (orig_blocks == fmt_blocks) and (orig_inlines == fmt_inlines)
+    return (
+        orig_blocks == fmt_blocks
+        and orig_inlines == fmt_inlines
+        and orig_figures == fmt_figures
+    )
 
 
-def _wrap_fallback_latex(tagged_text: str) -> str:
+def _wrap_fallback_latex(tagged_text: str, *, title: str = "") -> str:
     """
-    将 tagged_text 包装为最小可编译的 LaTeX 文档。
+    将 tagged_text 包装为最小可编译的 CPHOS LaTeX 文档。
     当小模型排版多次失败时作为兜底方案。
     """
     text = tagged_text
+    text = re.sub(r'【标题】[^\n]*\n?', '', text)
     text = re.sub(r'【题干】[：:]?\s*', '', text)
     text = re.sub(r'【小问设置】[：:]?\s*', '', text)
-    text = re.sub(r'【详细解答】[：:]?\s*|【解答】[：:]?\s*',
-                  r'\\textbf{参考答案}\n\n', text)
-    text = re.sub(r'(?<!\n)\n?(\{\{BLOCK_MATH_\d+\}\})\n?(?!\n)',
-                  r'\n\n\1\n\n', text)
-    return (
-        "\\documentclass[11pt,a4paper]{article}\n"
-        "\\usepackage{ctex}\n"
-        "\\usepackage{amsmath,amssymb,bm}\n"
-        "\\usepackage{geometry}\n"
-        "\\pagestyle{empty}\n\n"
-        "\\begin{document}\n\n"
-        f"{text}\n\n"
+
+    # 分割题干与解答
+    sol_match = re.search(
+        r'(?:参考答案|【详细解答】[：:]?\s*|【解答】[：:]?\s*)',
+        text,
+    )
+    if sol_match:
+        stmt = text[:sol_match.start()].strip()
+        sol = text[sol_match.end():].strip()
+        # 删除评分标准段落
+        score_match = re.search(r'\n\s*评分标准\s*\n', sol)
+        if score_match:
+            sol = sol[:score_match.start()].strip()
+    else:
+        stmt = text
+        sol = ""
+
+    stmt = re.sub(
+        r'(?<!\n)\n?(\{\{BLOCK_MATH_\d+\}\})\n?(?!\n)',
+        r'\n\n\1\n\n', stmt,
+    )
+
+    result = (
+        "\\documentclass[answer]{cphos}\n\n"
+        "\\begin{document}\n"
+        f"\\begin{{problem}}{{{title}}}\n\n"
+        "\\begin{problemstatement}\n"
+        f"{stmt}\n"
+        "\\end{problemstatement}\n\n"
+    )
+    if sol:
+        sol = re.sub(
+            r'(?<!\n)\n?(\{\{BLOCK_MATH_\d+\}\})\n?(?!\n)',
+            r'\n\n\1\n\n', sol,
+        )
+        result += (
+            "\\begin{solution}\n"
+            f"{sol}\n"
+            "\\end{solution}\n\n"
+        )
+    result += (
+        "\\end{problem}\n\n"
         "\\end{document}\n"
     )
+    return result
 
 
 def formatting_agent(state: AgentState) -> dict:
@@ -84,7 +124,8 @@ def formatting_agent(state: AgentState) -> dict:
     messages = [
         {"role": "system", "content": load("formatter", "system_prompt")},
         {"role": "user", "content": load("formatter", "user_prompt",
-            tagged_text=state["tagged_text"])},
+            tagged_text=state["tagged_text"],
+            title=state.get("title") or state.get("topic", ""))},
     ]
 
     total_p_tok = 0
@@ -148,5 +189,6 @@ def formatting_agent(state: AgentState) -> dict:
         prompt_tokens=total_p_tok, completion_tokens=total_c_tok,
         total_tokens=total_t_tok,
     )
-    fallback = _wrap_fallback_latex(state["tagged_text"])
+    fallback = _wrap_fallback_latex(state["tagged_text"],
+                                    title=state.get("title") or state.get("topic", ""))
     return {"formatted_text": fallback}

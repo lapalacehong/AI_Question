@@ -24,14 +24,16 @@ def generator_agent(state: AgentState) -> dict:
 
     if retry == 0:
         user_prompt = load("generator", "user_prompt_initial",
-                           topic=state["topic"], difficulty=state["difficulty"])
+                           topic=state["topic"], difficulty=state["difficulty"],
+                           total_score=str(state["total_score"]))
     else:
         user_prompt = load("generator", "user_prompt_retry",
                            arbiter_feedback=state["arbiter_feedback"],
                            draft_content=state["draft_content"])
 
     messages = [
-        {"role": "system", "content": load("generator", "system_prompt")},
+        {"role": "system", "content": load("generator", "system_prompt",
+                                           total_score=str(state["total_score"]))},
         {"role": "user", "content": user_prompt},
     ]
 

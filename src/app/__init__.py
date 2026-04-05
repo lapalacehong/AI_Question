@@ -48,19 +48,37 @@ def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
         "task_id": task_id,
         "topic": final_state.get("topic", ""),
         "difficulty": final_state.get("difficulty", ""),
+        "total_score": final_state.get("total_score", 0),
         "arbiter_decision": final_state.get("arbiter_decision", ""),
+        "arbiter_reason": final_state.get("arbiter_reason", ""),
         "arbiter_feedback": final_state.get("arbiter_feedback", ""),
         "retry_count": final_state.get("retry_count", 0),
         "math_review": final_state.get("math_review", ""),
         "physics_review": final_state.get("physics_review", ""),
         "block_formula_count": len(final_state.get("formula_dict", {})),
         "inline_formula_count": len(final_state.get("inline_dict", {})),
+        "figure_count": len(final_state.get("figure_descriptions", {})),
         "has_final_output": bool(final_state.get("final_latex")),
     }
     p = OUTPUT_DIR / f"{task_id}_log.json"
     with open(p, "w", encoding="utf-8") as f:
         json.dump(log_data, f, ensure_ascii=False, indent=2)
     paths["log"] = p
+
+    # ===== 图片绘制需求 =====
+    fig_desc = final_state.get("figure_descriptions", {})
+    if fig_desc:
+        assets_dir = OUTPUT_DIR / f"{task_id}_assets"
+        assets_dir.mkdir(exist_ok=True)
+        lines = ["# 图片绘制需求\n\n"]
+        for fig_name in sorted(fig_desc.keys()):
+            data = fig_desc[fig_name]
+            lines.append(f"## {data['filename']} — {data['caption']}\n\n")
+            lines.append(f"{data['description']}\n\n")
+        p = assets_dir / "README.md"
+        p.write_text("".join(lines), encoding="utf-8")
+        paths["figure_descriptions"] = p
+        logger.info(f"[output] 导出图片需求: {p}")
 
     return paths
 
@@ -167,21 +185,24 @@ def _load_input_json(filepath: str) -> dict:
 # ============ 主函数 ============
 
 def main(topic: str, difficulty: str = "国家集训队", *,
-         write_log: bool = False) -> None:
+         total_score: int = 50, write_log: bool = False) -> None:
     """主函数：构建图 → 执行 → 写出"""
 
     task_id = f"task_{uuid.uuid4().hex[:8]}"
     logger.info(f"{'='*60}")
-    logger.info(f"系统启动 | topic={topic[:60]} | difficulty={difficulty} | task_id={task_id}")
+    logger.info(f"系统启动 | topic={topic[:60]} | difficulty={difficulty} | total_score={total_score} | task_id={task_id}")
     logger.info(f"{'='*60}")
 
     initial_state: AgentState = {
         "topic": topic,
         "difficulty": difficulty,
+        "total_score": total_score,
+        "title": "",
         "draft_content": "",
         "math_review": "",
         "physics_review": "",
         "arbiter_decision": "",
+        "arbiter_reason": "",
         "arbiter_feedback": "",
         "retry_count": 0,
         "formula_dict": {},
@@ -189,6 +210,8 @@ def main(topic: str, difficulty: str = "国家集训队", *,
         "tagged_text": "",
         "formatted_text": "",
         "final_latex": "",
+        "figure_dict": {},
+        "figure_descriptions": {},
     }
 
     logger.info("构建工作流状态图...")
@@ -248,6 +271,8 @@ def _cli() -> None:
                        help="从 JSON 文件加载任务（需含 topic, difficulty 字段）")
     parser.add_argument("--difficulty", type=str, default="国家集训队",
                         help="难度等级（默认: 国家集训队）")
+    parser.add_argument("--score", type=int, default=50,
+                        help="题目总分（45-80，5的倍数，默认: 50）")
     parser.add_argument("--log", action="store_true",
                         help="追加运行记录到 TEST_LOG.md")
 
@@ -257,11 +282,13 @@ def _cli() -> None:
         data = _load_input_json(args.input)
         topic = data["topic"]
         difficulty = data.get("difficulty", args.difficulty)
+        total_score = data.get("total_score", args.score)
     else:
         topic = args.topic
         difficulty = args.difficulty
+        total_score = args.score
 
-    main(topic, difficulty, write_log=args.log)
+    main(topic, difficulty, total_score=total_score, write_log=args.log)
 
 
 if __name__ == "__main__":

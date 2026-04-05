@@ -7,11 +7,14 @@ from formatter.merger import python_merger
 
 def _make_state(**overrides) -> dict:
     base = {
-        "topic": "", "difficulty": "", "draft_content": "",
+        "topic": "", "difficulty": "", "total_score": 50, "title": "",
+        "draft_content": "",
         "math_review": "", "physics_review": "",
-        "arbiter_decision": "", "arbiter_feedback": "",
+        "arbiter_decision": "", "arbiter_reason": "", "arbiter_feedback": "",
         "retry_count": 0, "formula_dict": {}, "inline_dict": {},
+        "figure_dict": {},
         "tagged_text": "", "formatted_text": "", "final_latex": "",
+        "figure_descriptions": {},
     }
     base.update(overrides)
     return base
@@ -22,14 +25,26 @@ class TestBlockMerge:
         state = _make_state(
             formatted_text="文字\n{{BLOCK_MATH_1}}\n文字",
             formula_dict={
-                "{{BLOCK_MATH_1}}": {"label": "eq:test", "content": "E = mc^2"}
+                "{{BLOCK_MATH_1}}": {"label": "eq:test", "content": "E = mc^2", "score": ""}
             },
         )
         result = python_merger(state)
         assert "\\begin{equation}" in result["final_latex"]
-        assert "\\label{eq:test}" in result["final_latex"]
+        assert "\\label{eq:1}" in result["final_latex"]
+        assert "\\eqtag{1}" in result["final_latex"]
         assert "E = mc^2" in result["final_latex"]
         assert "{{BLOCK_MATH_" not in result["final_latex"]
+
+    def test_scored_block_merge(self):
+        state = _make_state(
+            formatted_text="文字\n{{BLOCK_MATH_1}}\n文字",
+            formula_dict={
+                "{{BLOCK_MATH_1}}": {"label": "eq:f", "content": "F = ma", "score": "3"}
+            },
+        )
+        result = python_merger(state)
+        assert "\\eqtagscore{1}{3}" in result["final_latex"]
+        assert "\\label{eq:1}" in result["final_latex"]
 
 
 class TestInlineMerge:
@@ -48,7 +63,7 @@ class TestMixedMerge:
         state = _make_state(
             formatted_text="由 {{INLINE_MATH_1}} 可知\n{{BLOCK_MATH_1}}\n结论",
             formula_dict={
-                "{{BLOCK_MATH_1}}": {"label": "eq:a", "content": "a = b"}
+                "{{BLOCK_MATH_1}}": {"label": "eq:a", "content": "a = b", "score": ""}
             },
             inline_dict={"{{INLINE_MATH_1}}": "F"},
         )
@@ -59,12 +74,89 @@ class TestMixedMerge:
         assert "{{INLINE_MATH_" not in result["final_latex"]
 
 
-class TestEmptyDicts:
-    def test_no_formulas(self):
+class TestFigureMerge:
+    def test_figure_backfill(self):
         state = _make_state(
-            formatted_text="纯文字",
-            formula_dict={},
-            inline_dict={},
+            formatted_text="文字\n{{FIGURE_1}}\n文字",
+            figure_dict={
+                "{{FIGURE_1}}": {
+                    "label": "fig:setup",
+                    "caption": "系统示意图",
+                    "description": "画一根导电细杆",
+                },
+            },
         )
         result = python_merger(state)
-        assert result["final_latex"] == "纯文字"
+        assert "%\\begin{figure}[H]" in result["final_latex"]
+        assert "fig/fig_1.pdf" in result["final_latex"]
+        assert "%    \\caption{系统示意图}" in result["final_latex"]
+        assert "%    \\label{fig:1}" in result["final_latex"]
+        assert "{{FIGURE_" not in result["final_latex"]
+        assert result["figure_descriptions"]["fig_1"]["filename"] == "fig_1.pdf"
+
+
+class TestCrossRefRemap:
+    def test_equation_ref_remap(self):
+        state = _make_state(
+            formatted_text="代入\\ref{eq:force}可得\n{{BLOCK_MATH_1}}\n结论",
+            formula_dict={
+                "{{BLOCK_MATH_1}}": {"label": "eq:force", "content": "F=ma", "score": ""}
+            },
+        )
+        result = python_merger(state)
+        assert "\\ref{eq:1}" in result["final_latex"]
+        assert "\\ref{eq:force}" not in result["final_latex"]
+
+
+class TestSubqConversion:
+    def test_problemstatement_subq(self):
+        state = _make_state(
+            formatted_text=(
+                "\\begin{problemstatement}\n"
+                "题干内容\n\n"
+                "(1) 第一问\n\n"
+                "(2) 第二问\n"
+                "\\end{problemstatement}\n"
+            ),
+        )
+        result = python_merger(state)
+        assert "\\subq{1}\\label{q:1}" in result["final_latex"]
+        assert "\\subq{2}\\label{q:2}" in result["final_latex"]
+
+    def test_solution_solsubq(self):
+        state = _make_state(
+            formatted_text=(
+                "\\begin{solution}\n"
+                "(1)[15分]\n"
+                "解答\n\n"
+                "(2)[25分]\n"
+                "解答\n"
+                "\\end{solution}\n"
+            ),
+        )
+        result = python_merger(state)
+        assert "\\solsubq{1}{15}" in result["final_latex"]
+        assert "\\solsubq{2}{25}" in result["final_latex"]
+
+
+class TestScoringAndTotal:
+    def test_scoring_added(self):
+        state = _make_state(
+            formatted_text="\\begin{solution}\n解答\n\\end{solution}",
+        )
+        result = python_merger(state)
+        assert "\\scoring" in result["final_latex"]
+
+    def test_total_score_computed(self):
+        state = _make_state(
+            formatted_text=(
+                "\\begin{problem}{}\n"
+                "\\begin{solution}\n"
+                "(1)[15分]\n解答\n"
+                "(2)[25分]\n解答\n"
+                "\\end{solution}\n"
+                "\\end{problem}\n"
+            ),
+        )
+        result = python_merger(state)
+        assert "\\begin{problem}[40]" in result["final_latex"]
