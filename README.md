@@ -61,6 +61,13 @@ uv run physics-generator --topic "刚体力学与角动量守恒"
 uv run physics-generator --topic "电磁感应" --difficulty "省级竞赛"
 uv run physics-generator --topic "电磁感应" --score 60
 uv run physics-generator --input task.json
+
+# 基于参考文献命题
+uv run physics-generator --topic "热辐射" --reference paper.pdf
+uv run physics-generator --topic "流体力学" --url "https://example.com/article"
+
+# 改编已有题目
+uv run physics-generator --adapt existing_problem.tex --difficulty "决赛"
 ```
 
 运行测试：
@@ -83,12 +90,25 @@ uv run pytest -v
 ### CLI 参数
 
 ```
-physics-generator --topic TEXT           # 必填：物理主题
+physics-generator --topic TEXT           # 必填：物理主题（与 --input/--adapt 互斥）
+                  --input FILE           # 从 JSON 文件加载（与 --topic/--adapt 互斥）
+                  --adapt FILE           # 基于已有题目改编（与 --topic/--input 互斥）
                   --difficulty TEXT       # 可选，默认 "国家集训队"
                   --score INT            # 可选，题目总分（20-80，默认 40）
-                  --input FILE           # 从 JSON 文件加载（与 --topic 互斥）
+                  --reference FILE       # 参考文献文件（PDF/TXT/MD/TEX），可多次指定
+                  --url URL              # 参考网页 URL，可多次指定
                   --log                  # 追加运行记录到 TEST_LOG.md
 ```
+
+### 难度等级
+
+系统根据 `--difficulty` 参数自动映射到三个竞赛等级，影响命题、验算和仲裁的行为：
+
+| 等级 | 触发关键词 | 物理范围 |
+|------|-----------|---------|
+| 复赛（fusai） | 复赛、省赛、省级、预赛 | 经典力学、基础热力学、几何光学、基础电磁学 |
+| 决赛（juesai） | 决赛（默认） | +完整电磁学、刚体、基础相对论、统计物理初步 |
+| 集训队（jixundui） | 集训、国家队、CMO、IPhO | 不设上限，但高级工具必须在题干给出 |
 
 ## 项目结构
 
@@ -113,8 +133,15 @@ AI_Question/
 │   │   ├── verifier.yaml         # 数学 / 物理验算 Agent 提示词
 │   │   ├── arbiter.yaml          # 仲裁 Agent 提示词
 │   │   └── formatter.yaml        # 格式化 Agent 提示词
+│   ├── reader/                   # 参考资料读取器
+│   │   ├── __init__.py           # extract_content() 工厂 + 自动类型检测
+│   │   ├── base.py               # ReaderResult + truncate_content()
+│   │   ├── pdf_reader.py         # PyMuPDF 提取 PDF 文本
+│   │   ├── web_reader.py         # httpx + html2text 抓取网页
+│   │   ├── text_reader.py        # TXT/MD/TEX 直接读取
+│   │   └── problem_reader.py     # 改编模式（复用 text/pdf reader）
 │   ├── generator/                # 命题与审核 Agent
-│   │   ├── generator.py          # 命题 Agent
+│   │   ├── generator.py          # 命题 Agent（含难度分级逻辑）
 │   │   ├── math_verifier.py      # 数学验算 Agent
 │   │   ├── physics_verifier.py   # 物理验算 Agent
 │   │   └── arbiter.py            # 仲裁 Agent

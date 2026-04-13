@@ -16,10 +16,13 @@ def physics_verifier(state: AgentState) -> dict:
     logger.info("[physics_verifier] 进入物理验算节点")
 
     client = get_client()
+    tier = state.get("difficulty_tier", "juesai")
+    calibration = load("verifier", f"physics_calibration_{tier}")
     messages = [
         {"role": "system", "content": load("verifier", "physics_verifier_system_prompt")},
         {"role": "user", "content": load("verifier", "user_prompt",
-            draft_content=state["draft_content"])},
+            draft_content=state["draft_content"],
+            verification_calibration=calibration)},
     ]
 
     logger.info("[physics_verifier] 正在等待 thinking model 审核...")

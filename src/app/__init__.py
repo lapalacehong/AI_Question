@@ -48,6 +48,9 @@ def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
         "task_id": task_id,
         "topic": final_state.get("topic", ""),
         "difficulty": final_state.get("difficulty", ""),
+        "difficulty_tier": final_state.get("difficulty_tier", ""),
+        "generation_mode": final_state.get("generation_mode", "free"),
+        "reference_source": final_state.get("reference_source", ""),
         "total_score": final_state.get("total_score", 0),
         "arbiter_decision": final_state.get("arbiter_decision", ""),
         "arbiter_reason": final_state.get("arbiter_reason", ""),
@@ -219,7 +222,10 @@ def _load_input_json(filepath: str) -> dict:
 # ============ 主函数 ============
 
 def main(topic: str, difficulty: str = "国家集训队", *,
-         total_score: int = 50, write_log: bool = False) -> None:
+         total_score: int = 50, write_log: bool = False,
+         references: list[str] | None = None,
+         urls: list[str] | None = None,
+         adapt_source: str | None = None) -> None:
     """主函数：构建图 → 执行 → 写出"""
 
     task_id = f"task_{uuid.uuid4().hex[:8]}"
@@ -227,10 +233,54 @@ def main(topic: str, difficulty: str = "国家集训队", *,
     logger.info(f"系统启动 | topic={topic[:60]} | difficulty={difficulty} | total_score={total_score} | task_id={task_id}")
     logger.info(f"{'='*60}")
 
+    # ===== 参考资料 / 改编源处理 =====
+    generation_mode = "free"
+    reference_content = ""
+    reference_source = ""
+
+    if adapt_source:
+        from reader import extract_content
+        result = extract_content(adapt_source, source_type="problem")
+        generation_mode = "adapt"
+        reference_content = result.content
+        reference_source = result.source_label
+        if result.truncated:
+            logger.warning(f"[reader] 改编源文件已截断: {result.source_label}")
+        logger.info(f"[reader] 加载改编源: {result.source_label} | {len(result.content)} 字符")
+
+    elif references or urls:
+        from reader import extract_content
+        generation_mode = "reference"
+        parts = []
+        labels = []
+
+        for ref_path in (references or []):
+            result = extract_content(ref_path)
+            parts.append(f"--- 参考文件: {result.source_label} ---\n{result.content}")
+            labels.append(result.source_label)
+            if result.truncated:
+                logger.warning(f"[reader] 参考文件已截断: {result.source_label}")
+            logger.info(f"[reader] 加载参考文件: {result.source_label} | {len(result.content)} 字符")
+
+        for url in (urls or []):
+            result = extract_content(url, source_type="url")
+            parts.append(f"--- 参考网页: {result.source_label} ---\n{result.content}")
+            labels.append(result.source_label)
+            if result.truncated:
+                logger.warning(f"[reader] 网页内容已截断: {result.source_label}")
+            logger.info(f"[reader] 加载网页: {result.source_label} | {len(result.content)} 字符")
+
+        reference_content = "\n\n".join(parts)
+        reference_source = ", ".join(labels)
+
     initial_state: AgentState = {
         "topic": topic,
         "difficulty": difficulty,
+        "difficulty_tier": "",
         "total_score": total_score,
+        "generation_mode": generation_mode,
+        "reference_content": reference_content,
+        "reference_source": reference_source,
         "title": "",
         "draft_content": "",
         "math_review": "",
@@ -304,12 +354,18 @@ def _cli() -> None:
     group.add_argument("--topic", type=str, help="物理主题（直接指定）")
     group.add_argument("--input", type=str, metavar="FILE",
                        help="从 JSON 文件加载任务（需含 topic, difficulty 字段）")
+    group.add_argument("--adapt", type=str, metavar="FILE",
+                       help="基于已有题目改编（PDF/TXT/MD/TEX）")
     parser.add_argument("--difficulty", type=str, default="国家集训队",
                         help="难度等级（默认: 国家集训队）")
     parser.add_argument("--score", type=int, default=40,
                         help="题目总分（20-80，默认: 40）")
     parser.add_argument("--log", action="store_true",
                         help="追加运行记录到 TEST_LOG.md")
+    parser.add_argument("--reference", type=str, action="append", metavar="FILE",
+                        help="参考文献文件（PDF/TXT/MD/TEX），可多次指定")
+    parser.add_argument("--url", type=str, action="append", metavar="URL",
+                        help="参考网页 URL，可多次指定")
 
     args = parser.parse_args()
 
@@ -318,12 +374,21 @@ def _cli() -> None:
         topic = data["topic"]
         difficulty = data.get("difficulty", args.difficulty)
         total_score = data.get("total_score", args.score)
+        main(topic, difficulty, total_score=total_score, write_log=args.log,
+             references=args.reference, urls=args.url)
+    elif args.adapt:
+        # 改编模式：topic 从文件名派生
+        topic = Path(args.adapt).stem
+        difficulty = args.difficulty
+        total_score = args.score
+        main(topic, difficulty, total_score=total_score, write_log=args.log,
+             adapt_source=args.adapt)
     else:
         topic = args.topic
         difficulty = args.difficulty
         total_score = args.score
-
-    main(topic, difficulty, total_score=total_score, write_log=args.log)
+        main(topic, difficulty, total_score=total_score, write_log=args.log,
+             references=args.reference, urls=args.url)
 
 
 if __name__ == "__main__":

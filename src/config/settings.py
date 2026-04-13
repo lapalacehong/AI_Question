@@ -84,3 +84,6 @@ FALLBACK_BLOCK_PATTERN: str = r'\$\$\s*(.+?)\s*\$\$'
 FIGURE_PATTERN: str = r'<figure\s+label="([^"]+)"\s+caption="([^"]*)"\s*>\s*(.*?)\s*</figure>'
 FIGURE_PLACEHOLDER_PREFIX: str = "{{FIGURE_"
 FIGURE_PLACEHOLDER_SUFFIX: str = "}}"
+
+# ============ 参考资料配置 ============
+REFERENCE_MAX_CHARS: int = 12000            # 参考资料最大字符数（约 4000 tokens）

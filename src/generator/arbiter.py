@@ -59,12 +59,25 @@ def arbiter_agent(state: AgentState) -> dict:
 
     client = get_client()
 
+    # 构建难度校准
+    tier = state.get("difficulty_tier", "juesai")
+    arbiter_calibration = load("arbiter", f"calibration_{tier}")
+
+    # 改编模式额外注入合规检查
+    mode = state.get("generation_mode", "free")
+    if mode == "adapt" and state.get("reference_content"):
+        summary = state["reference_content"][:500]
+        adapt_check = load("arbiter", "adapt_compliance_check",
+                           reference_summary=summary)
+        arbiter_calibration = arbiter_calibration + "\n" + adapt_check
+
     messages = [
         {"role": "system", "content": load("arbiter", "system_prompt")},
         {"role": "user", "content": load("arbiter", "user_prompt",
             draft_content=state["draft_content"],
             math_review=state["math_review"],
-            physics_review=state["physics_review"])},
+            physics_review=state["physics_review"],
+            arbiter_calibration=arbiter_calibration)},
     ]
 
     elapsed = 0.0

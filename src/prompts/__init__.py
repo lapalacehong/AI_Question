@@ -6,7 +6,7 @@ YAML 提示词加载器。
     from prompts import load
 
     # 加载系统提示词（无变量替换）
-    system_prompt = load("generator", "system_prompt")
+    system_prompt = load("generator", "system_prompt_base")
 
     # 加载用户提示词（带变量替换）
     user_prompt = load("generator", "user_prompt_initial", topic="电磁感应", difficulty="国家集训队")
