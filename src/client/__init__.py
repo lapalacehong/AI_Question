@@ -13,10 +13,10 @@ __all__ = ["get_client", "stream_chat", "UsageInfo", "BaseLLMClient"]
 
 def get_client() -> BaseLLMClient:
     """根据 LLM_PROVIDER 配置创建客户端实例。"""
-    from config.settings import LLM_PROVIDER, MODEL_TIMEOUT
+    from config.config import LLM_PROVIDER, MODEL_TIMEOUT
 
     if LLM_PROVIDER == "openrouter":
-        from config.settings import OPENROUTER_API_KEY
+        from config.config import OPENROUTER_API_KEY
         if not OPENROUTER_API_KEY:
             raise ValueError(
                 "使用 openrouter 提供商但 OPENROUTER_API_KEY 未设置。\n"
@@ -26,7 +26,7 @@ def get_client() -> BaseLLMClient:
         return OpenRouterClient(api_key=OPENROUTER_API_KEY, timeout=MODEL_TIMEOUT)
 
     elif LLM_PROVIDER == "openai_compatible":
-        from config.settings import LLM_API_KEY, LLM_BASE_URL
+        from config.config import LLM_API_KEY, LLM_BASE_URL
         if not LLM_API_KEY or not LLM_BASE_URL:
             raise ValueError(
                 "使用 openai_compatible 提供商但 LLM_API_KEY 或 LLM_BASE_URL 未设置。\n"

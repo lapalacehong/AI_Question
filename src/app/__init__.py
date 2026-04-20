@@ -5,26 +5,28 @@
     uv run physics-generator --topic "刚体力学"
     uv run physics-generator --topic "电磁感应" --difficulty "省级竞赛"
     uv run physics-generator --input task.json
+    uv run physics-generator --adapt source.txt
+    uv run physics-generator --adapt source.txt --mode idea_expansion
 """
-import sys
 import json
 import uuid
 import time
 import argparse
 from pathlib import Path
 
-from graph.workflow import build_graph
-from model.state import AgentState
+from engine.state_machine import build_graph
+from spec.normalizer import from_cli, from_json
+from model.state import WorkflowData
 from model.stats import get_all as get_run_stats, get_total_tokens, clear as clear_run_stats
-from config.settings import (
+from config.config import (
     logger, BIG_MODEL_NAME, BIG_MODEL_MAX_TOKENS, ARBITER_MAX_TOKENS,
-    SMALL_MODEL_NAME, SMALL_MODEL_MAX_TOKENS, PROJECT_ROOT, OUTPUT_DIR,
+    PROJECT_ROOT, OUTPUT_DIR,
 )
 
 
 # ============ 输出写入 ============
 
-def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
+def _write_outputs(task_id: str, final_state: WorkflowData) -> dict[str, Path]:
     """将 final_state 的关键内容写入 output/ 目录。"""
     paths: dict[str, Path] = {}
 
@@ -48,17 +50,21 @@ def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
         "task_id": task_id,
         "topic": final_state.get("topic", ""),
         "difficulty": final_state.get("difficulty", ""),
-        "difficulty_tier": final_state.get("difficulty_tier", ""),
-        "generation_mode": final_state.get("generation_mode", "free"),
-        "reference_source": final_state.get("reference_source", ""),
+        "mode": final_state.get("mode", "topic_generation"),
+        "source_material": final_state.get("source_material", "")[:200],
         "total_score": final_state.get("total_score", 0),
         "arbiter_decision": final_state.get("arbiter_decision", ""),
         "arbiter_reason": final_state.get("arbiter_reason", ""),
         "error_category": final_state.get("error_category", ""),
         "arbiter_feedback": final_state.get("arbiter_feedback", ""),
         "retry_count": final_state.get("retry_count", 0),
+        "problem_retry_count": final_state.get("problem_retry_count", 0),
+        "solution_retry_count": final_state.get("solution_retry_count", 0),
         "math_review": final_state.get("math_review", ""),
         "physics_review": final_state.get("physics_review", ""),
+        "structure_review": final_state.get("structure_review", ""),
+        "template_report": final_state.get("template_report", ""),
+        "external_decision": final_state.get("external_decision", ""),
         "block_formula_count": len(final_state.get("formula_dict", {})),
         "inline_formula_count": len(final_state.get("inline_dict", {})),
         "figure_count": len(final_state.get("figure_descriptions", {})),
@@ -74,7 +80,8 @@ def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
     decision_label = {
         "PASS": "✅ 通过",
         "PASS_WITH_EDITS": "⚠️ 有条件通过（仅存在用语规范问题，需人工修订）",
-        "RETRY": "🔄 重试未通过",
+        "RETRY_PROBLEM": "🔄 重试未通过（题干问题）",
+        "RETRY_SOLUTION": "🔄 重试未通过（解答问题）",
         "ABORT": "❌ 废弃",
     }.get(decision, decision)
     report_lines = [
@@ -94,6 +101,8 @@ def _write_outputs(task_id: str, final_state: AgentState) -> dict[str, Path]:
         f"{final_state.get('math_review', '无')}\n\n",
         f"## 物理审核意见\n\n",
         f"{final_state.get('physics_review', '无')}\n\n",
+        f"## 结构审核意见\n\n",
+        f"{final_state.get('structure_review', '无')}\n\n",
         f"## 仲裁反馈\n\n",
         f"{final_state.get('arbiter_feedback', '无')}\n",
     ]
@@ -144,8 +153,9 @@ def _append_test_log(
     status = "❌ 失败" if error_msg else "✅ 成功"
 
     node_lines = []
-    for key in ["generator_r0", "generator_r1", "generator_r2",
-                 "math_verifier", "physics_verifier",
+    for key in ["problem_gen_r0", "problem_gen_r1", "problem_gen_r2",
+                 "solution_gen_r0", "solution_gen_r1", "solution_gen_r2",
+                 "math_check", "physics_check",
                  "arbiter_r1", "arbiter_r2", "arbiter_r3",
                  "formatter"]:
         if key in stats:
@@ -204,103 +214,30 @@ def _append_test_log(
     logger.info(f"[TEST_LOG] Run #{run_num} 已追加到 {log_path}")
 
 
-# ============ 输入加载 ============
-
-def _load_input_json(filepath: str) -> dict:
-    """从 JSON 文件加载任务。"""
-    p = Path(filepath)
-    if not p.exists():
-        raise FileNotFoundError(f"任务文件未找到: {p}")
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    for field in ("topic", "difficulty"):
-        if field not in data:
-            raise KeyError(f"JSON 缺少必填字段: '{field}'，文件: {p}")
-    return data
-
-
 # ============ 主函数 ============
 
 def main(topic: str, difficulty: str = "国家集训队", *,
          total_score: int = 50, write_log: bool = False,
-         references: list[str] | None = None,
-         urls: list[str] | None = None,
-         adapt_source: str | None = None) -> None:
-    """主函数：构建图 → 执行 → 写出"""
+         source_file: str | None = None,
+         mode: str | None = None,
+         enable_review: bool = False) -> None:
+    """主函数：构建状态机 → 执行 → 写出"""
 
     task_id = f"task_{uuid.uuid4().hex[:8]}"
     logger.info(f"{'='*60}")
     logger.info(f"系统启动 | topic={topic[:60]} | difficulty={difficulty} | total_score={total_score} | task_id={task_id}")
     logger.info(f"{'='*60}")
 
-    # ===== 参考资料 / 改编源处理 =====
-    generation_mode = "free"
-    reference_content = ""
-    reference_source = ""
+    initial_state = from_cli(
+        topic=topic,
+        difficulty=difficulty,
+        total_score=total_score,
+        source_file=source_file,
+        mode=mode,
+    )
 
-    if adapt_source:
-        from reader import extract_content
-        result = extract_content(adapt_source, source_type="problem")
-        generation_mode = "adapt"
-        reference_content = result.content
-        reference_source = result.source_label
-        if result.truncated:
-            logger.warning(f"[reader] 改编源文件已截断: {result.source_label}")
-        logger.info(f"[reader] 加载改编源: {result.source_label} | {len(result.content)} 字符")
-
-    elif references or urls:
-        from reader import extract_content
-        generation_mode = "reference"
-        parts = []
-        labels = []
-
-        for ref_path in (references or []):
-            result = extract_content(ref_path)
-            parts.append(f"--- 参考文件: {result.source_label} ---\n{result.content}")
-            labels.append(result.source_label)
-            if result.truncated:
-                logger.warning(f"[reader] 参考文件已截断: {result.source_label}")
-            logger.info(f"[reader] 加载参考文件: {result.source_label} | {len(result.content)} 字符")
-
-        for url in (urls or []):
-            result = extract_content(url, source_type="url")
-            parts.append(f"--- 参考网页: {result.source_label} ---\n{result.content}")
-            labels.append(result.source_label)
-            if result.truncated:
-                logger.warning(f"[reader] 网页内容已截断: {result.source_label}")
-            logger.info(f"[reader] 加载网页: {result.source_label} | {len(result.content)} 字符")
-
-        reference_content = "\n\n".join(parts)
-        reference_source = ", ".join(labels)
-
-    initial_state: AgentState = {
-        "topic": topic,
-        "difficulty": difficulty,
-        "difficulty_tier": "",
-        "total_score": total_score,
-        "generation_mode": generation_mode,
-        "reference_content": reference_content,
-        "reference_source": reference_source,
-        "title": "",
-        "draft_content": "",
-        "math_review": "",
-        "physics_review": "",
-        "arbiter_decision": "",
-        "arbiter_reason": "",
-        "arbiter_feedback": "",
-        "error_category": "",
-        "retry_count": 0,
-        "formula_dict": {},
-        "inline_dict": {},
-        "tagged_text": "",
-        "formatted_text": "",
-        "final_latex": "",
-        "figure_dict": {},
-        "figure_descriptions": {},
-    }
-
-    logger.info("构建工作流状态图...")
-    compiled_graph = build_graph()
+    logger.info("构建工作流状态机...")
+    compiled_graph = build_graph(enable_external_review=enable_review)
     clear_run_stats()
 
     logger.info("开始执行推理流（可能需要数分钟）...")
@@ -309,10 +246,10 @@ def main(topic: str, difficulty: str = "国家集训队", *,
     final_state = initial_state
 
     try:
-        final_state = compiled_graph.invoke(initial_state)
+        final_state = compiled_graph.run(initial_state)
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
-        logger.error(f"图执行异常: {error_msg}")
+        logger.error(f"执行异常: {error_msg}")
 
     total_elapsed = time.time() - t_start
 
@@ -353,42 +290,51 @@ def _cli() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--topic", type=str, help="物理主题（直接指定）")
     group.add_argument("--input", type=str, metavar="FILE",
-                       help="从 JSON 文件加载任务（需含 topic, difficulty 字段）")
+                       help="从 JSON 文件加载任务（需含 topic 或 source_material 字段）")
     group.add_argument("--adapt", type=str, metavar="FILE",
-                       help="基于已有题目改编（PDF/TXT/MD/TEX）")
+                       help="基于已有材料改编（文件路径）")
     parser.add_argument("--difficulty", type=str, default="国家集训队",
                         help="难度等级（默认: 国家集训队）")
-    parser.add_argument("--score", type=int, default=40,
-                        help="题目总分（20-80，默认: 40）")
+    parser.add_argument("--score", type=int, default=50,
+                        help="题目总分（20-80，默认: 50）")
+    parser.add_argument("--mode", type=str, default=None,
+                        choices=["topic_generation", "literature_adaptation",
+                                 "idea_expansion", "problem_enrichment"],
+                        help="命题模式（默认自动推断）")
+    parser.add_argument("--review", action="store_true",
+                        help="启用 AI_Reviewer 外部审题")
     parser.add_argument("--log", action="store_true",
                         help="追加运行记录到 TEST_LOG.md")
-    parser.add_argument("--reference", type=str, action="append", metavar="FILE",
-                        help="参考文献文件（PDF/TXT/MD/TEX），可多次指定")
-    parser.add_argument("--url", type=str, action="append", metavar="URL",
-                        help="参考网页 URL，可多次指定")
 
     args = parser.parse_args()
 
     if args.input:
-        data = _load_input_json(args.input)
-        topic = data["topic"]
-        difficulty = data.get("difficulty", args.difficulty)
-        total_score = data.get("total_score", args.score)
-        main(topic, difficulty, total_score=total_score, write_log=args.log,
-             references=args.reference, urls=args.url)
+        data = from_json(args.input)
+        compiled_graph = build_graph(enable_external_review=args.review)
+        clear_run_stats()
+        task_id = f"task_{uuid.uuid4().hex[:8]}"
+        t_start = time.time()
+        try:
+            final_state = compiled_graph.run(data)
+        except Exception as e:
+            logger.error("执行异常: %s", e)
+            return
+        total_elapsed = time.time() - t_start
+        _write_outputs(task_id, final_state)
+        if args.log:
+            _append_test_log(
+                topic=data.get("topic", ""), difficulty=data.get("difficulty", ""),
+                model=BIG_MODEL_NAME, max_tokens=BIG_MODEL_MAX_TOKENS,
+                total_elapsed=total_elapsed, final_state=final_state, error_msg="",
+            )
     elif args.adapt:
-        # 改编模式：topic 从文件名派生
         topic = Path(args.adapt).stem
-        difficulty = args.difficulty
-        total_score = args.score
-        main(topic, difficulty, total_score=total_score, write_log=args.log,
-             adapt_source=args.adapt)
+        main(topic, args.difficulty, total_score=args.score,
+             write_log=args.log, source_file=args.adapt, mode=args.mode,
+             enable_review=args.review)
     else:
-        topic = args.topic
-        difficulty = args.difficulty
-        total_score = args.score
-        main(topic, difficulty, total_score=total_score, write_log=args.log,
-             references=args.reference, urls=args.url)
+        main(args.topic, args.difficulty, total_score=args.score,
+             write_log=args.log, mode=args.mode, enable_review=args.review)
 
 
 if __name__ == "__main__":

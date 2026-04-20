@@ -1,22 +1,24 @@
 """
 仲裁 Agent。
 使用 OpenAI Function Calling 确保输出可解析。
-配合 try/except 兜底，即使结构化解析失败也不会崩溃。
+裁决类型: PASS / RETRY_PROBLEM / RETRY_SOLUTION / ABORT。
 每次执行 retry_count += 1。
 """
 import json
 import re
 import time
 
-from model.state import AgentState
+from model.state import WorkflowData
 from model.schema import ArbiterDecision
 from model.stats import record
 from client import get_client
-from config.settings import (
+from config.config import (
     BIG_MODEL_NAME, ARBITER_MAX_TOKENS, logger,
 )
 from prompts import load
 
+
+_VALID_DECISIONS = ("PASS", "RETRY_PROBLEM", "RETRY_SOLUTION", "ABORT")
 
 # 从 Pydantic 模型生成 OpenAI Function Calling 工具定义
 _ARBITER_TOOLS = [{
@@ -37,53 +39,43 @@ def _parse_text_response(text: str) -> tuple[str, str]:
     text_upper = text.upper()
 
     # 尝试从 JSON 块中解析
-    json_match = re.search(r'\{[^{}]*"decision"\s*:\s*"(PASS|RETRY|ABORT)"[^{}]*\}', text, re.IGNORECASE)
+    json_match = re.search(
+        r'\{[^{}]*"decision"\s*:\s*"(PASS|RETRY_PROBLEM|RETRY_SOLUTION|ABORT)"[^{}]*\}',
+        text, re.IGNORECASE,
+    )
     if json_match:
         try:
             parsed = json.loads(json_match.group(0))
-            return parsed.get("decision", "RETRY").strip().upper(), parsed.get("feedback", text)
+            return parsed.get("decision", "RETRY_PROBLEM").strip().upper(), parsed.get("feedback", text)
         except json.JSONDecodeError:
             pass
 
-    # 关键词匹配
-    for keyword in ("PASS", "ABORT", "RETRY"):
+    # 关键词匹配（按优先级排序，先匹配更具体的）
+    for keyword in ("RETRY_PROBLEM", "RETRY_SOLUTION", "PASS", "ABORT"):
         if keyword in text_upper:
             return keyword, text
 
-    return "RETRY", f"[系统] 无法从文本中提取裁决，强制重试。原文: {text[:500]}"
+    return "RETRY_PROBLEM", f"[系统] 无法从文本中提取裁决，强制重试命题。原文: {text[:500]}"
 
 
-def arbiter_agent(state: AgentState) -> dict:
-    """仲裁节点：综合两份审核意见，输出结构化裁决。"""
+def arbiter_agent(data: WorkflowData) -> dict:
+    """仲裁节点：综合三份审核意见，输出结构化裁决。"""
     logger.info("[arbiter] 进入仲裁节点")
 
     client = get_client()
 
-    # 构建难度校准
-    tier = state.get("difficulty_tier", "juesai")
-    arbiter_calibration = load("arbiter", f"calibration_{tier}")
-
-    # 改编模式额外注入合规检查
-    mode = state.get("generation_mode", "free")
-    if mode == "adapt" and state.get("reference_content"):
-        summary = state["reference_content"][:500]
-        adapt_check = load("arbiter", "adapt_compliance_check",
-                           reference_summary=summary)
-        arbiter_calibration = arbiter_calibration + "\n" + adapt_check
-
     messages = [
         {"role": "system", "content": load("arbiter", "system_prompt")},
         {"role": "user", "content": load("arbiter", "user_prompt",
-            draft_content=state["draft_content"],
-            math_review=state["math_review"],
-            physics_review=state["physics_review"],
-            arbiter_calibration=arbiter_calibration)},
+            draft_content=data["draft_content"],
+            math_review=data["math_review"],
+            physics_review=data["physics_review"],
+            structure_review=data.get("structure_review", ""))},
     ]
 
     elapsed = 0.0
-    p_tok = 0
-    c_tok = 0
-    t_tok = 0
+    p_tok = c_tok = t_tok = 0
+
     try:
         logger.info("[arbiter] 正在等待 thinking model 仲裁...")
         t0 = time.time()
@@ -100,14 +92,13 @@ def arbiter_agent(state: AgentState) -> dict:
         p_tok = usage.prompt_tokens if usage else 0
         c_tok = usage.completion_tokens if usage else 0
         t_tok = usage.total_tokens if usage else 0
-        logger.info(f"[arbiter] 仲裁响应到达 | {elapsed:.0f}s | tokens: {p_tok}+{c_tok}={t_tok}")
+        logger.info("[arbiter] 响应到达 | %.0fs | tokens: %d+%d=%d", elapsed, p_tok, c_tok, t_tok)
 
         msg = resp.choices[0].message
 
-        # 优先从 tool_calls 解析（标准路径）
+        # 优先从 tool_calls 解析
         if msg.tool_calls:
-            tool_call = msg.tool_calls[0]
-            result = json.loads(tool_call.function.arguments)
+            result = json.loads(msg.tool_calls[0].function.arguments)
             parsed = ArbiterDecision(**result)
             decision = parsed.decision.strip().upper()
             reason = parsed.reason
@@ -116,28 +107,33 @@ def arbiter_agent(state: AgentState) -> dict:
             if error_category not in ("none", "style", "fatal"):
                 error_category = "fatal"
         else:
-            # Fallback: 模型未使用 tool_calls（如 Gemini via OpenRouter），从文本内容解析
-            logger.warning("[arbiter] 模型未返回 tool_calls，尝试从文本内容解析")
+            # Fallback: 从文本内容解析
+            logger.warning("[arbiter] 模型未返回 tool_calls，尝试从文本解析")
             raw = msg.content or ""
             decision, feedback = _parse_text_response(raw)
             reason = feedback[:200]
             error_category = "fatal"
 
-        # 校验 decision 是否为合法值
-        if decision not in ("PASS", "RETRY", "ABORT"):
-            logger.warning(f"[arbiter] 非法 decision: '{decision}'，强制视为 RETRY")
-            decision = "RETRY"
-            feedback = f"[系统] 仲裁返回非法值'{decision}'，强制重试。原始反馈: {feedback}"
+        # 兼容旧值 "RETRY" → 映射为 "RETRY_PROBLEM"
+        if decision == "RETRY":
+            decision = "RETRY_PROBLEM"
+
+        # 校验 decision 合法性
+        if decision not in _VALID_DECISIONS:
+            raw_decision = decision
+            logger.warning("[arbiter] 非法 decision: '%s'，强制视为 RETRY_PROBLEM", raw_decision)
+            decision = "RETRY_PROBLEM"
+            feedback = f"[系统] 仲裁返回非法值'{raw_decision}'，强制重试。原始反馈: {feedback}"
 
     except Exception as e:
-        logger.error(f"[arbiter] 结构化解析失败: {e}，触发兜底 RETRY")
-        decision = "RETRY"
+        logger.error("[arbiter] 结构化解析失败: %s，触发兜底 RETRY_PROBLEM", e)
+        decision = "RETRY_PROBLEM"
         reason = f"系统错误: {str(e)}"
         feedback = f"[系统错误] 仲裁解析失败，强制重试。异常: {str(e)}"
         error_category = "fatal"
 
-    new_retry = state.get("retry_count", 0) + 1
-    logger.info(f"[arbiter] 裁决={decision} | 理由={reason[:80]} | retry_count 递增至 {new_retry}")
+    new_retry = data.get("retry_count", 0) + 1
+    logger.info("[arbiter] 裁决=%s | 理由=%s | retry_count→%d", decision, reason[:80], new_retry)
 
     record(
         f"arbiter_r{new_retry}", 0, elapsed, extra=decision,

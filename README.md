@@ -1,168 +1,239 @@
 # CPhOS 物理竞赛题全自动生成系统
 
-基于多 Agent 状态机编排的 AI 系统，自动生成 CPhO 决赛级物理竞赛大题，经数学 / 物理双重审核与仲裁闭环后输出可编译的 LaTeX 文档。
+基于状态机编排的多 Agent AI 系统，自动生成 CPhO 决赛级物理竞赛大题。  
+系统将**命题**与**解题**拆分为独立 Agent，经数学 / 物理 / 结构三重审核与仲裁闭环后，输出可编译的 CPHOS LaTeX 文档。
+
+---
 
 ## 工作流
 
 ```mermaid
 flowchart TD
-    START([开始]) --> GEN[命题 Agent<br/><i>大模型生成题目</i>]
-    GEN --> PAR{并行验算}
-    PAR --> MATH[数学验算 Agent<br/><i>推导 & 符号检查</i>]
-    PAR --> PHYS[物理验算 Agent<br/><i>模型 & 量纲检查</i>]
+    START([开始]) --> PLAN[命题规划<br/><i>难度分析 + 小问规模</i>]
+    PLAN --> PGEN[命题 Agent<br/><i>生成题干 + 小问</i>]
+    PGEN --> SGEN[解题 Agent<br/><i>生成参考答案 + 评分点</i>]
+    SGEN --> PAR{并行审核}
+    PAR --> MATH[数学审核<br/><i>推导 & 符号检查</i>]
+    PAR --> PHYS[物理审核<br/><i>模型 & 量纲检查</i>]
+    PAR --> STRUCT[结构审核<br/><i>编号 & 分值 & 公式配对</i>]
     MATH --> ARB[仲裁 Agent<br/><i>综合裁决 + 错误分类</i>]
     PHYS --> ARB
-    ARB -->|PASS| PARSE[正则隔离器<br/><i>标题 + 公式 + 图片提取</i>]
-    ARB -->|PASS_WITH_EDITS| PARSE
-    ARB -->|RETRY ≤3| GEN
+    STRUCT --> ARB
+    ARB -->|PASS| ISO[正则隔离器<br/><i>公式 + 图片提取</i>]
+    ARB -->|RETRY_PROBLEM ≤3| PGEN
+    ARB -->|RETRY_SOLUTION ≤3| SGEN
     ARB -->|ABORT / 超限| END1([终止])
-    PARSE --> FMT[格式化 Agent<br/><i>小模型 LaTeX 排版</i>]
+    ISO --> FMT[格式化 Agent<br/><i>小模型 LaTeX 排版</i>]
     FMT --> MERGE[回填器<br/><i>公式编号 & 回填</i>]
-    MERGE --> END2([输出 .tex + 仲裁报告])
+    MERGE --> TFIX[模板修正<br/><i>规则检查 + 自动修复</i>]
+    TFIX --> EXT{外部审题?}
+    EXT -->|是| AIR[AI_Reviewer<br/><i>子进程审核</i>]
+    EXT -->|否| END2
+    AIR --> END2([输出 .tex + 报告])
 
-    style GEN fill:#4a9eff,color:#fff
+    style PLAN fill:#636e72,color:#fff
+    style PGEN fill:#4a9eff,color:#fff
+    style SGEN fill:#0984e3,color:#fff
     style MATH fill:#ff9f43,color:#fff
     style PHYS fill:#ff9f43,color:#fff
+    style STRUCT fill:#ff9f43,color:#fff
     style ARB fill:#ee5a24,color:#fff
-    style PARSE fill:#a29bfe,color:#fff
+    style ISO fill:#a29bfe,color:#fff
     style FMT fill:#00b894,color:#fff
     style MERGE fill:#a29bfe,color:#fff
+    style TFIX fill:#6c5ce7,color:#fff
+    style AIR fill:#fd79a8,color:#fff
 ```
 
-**节点说明**
+### 状态机阶段
+
+系统核心是一个显式状态机 `GenerationStateMachine`，阶段定义如下：
+
+```
+INIT → PLANNING → PROBLEM_GENERATING → SOLUTION_GENERATING
+     → REVIEWING → ARBITRATING
+     → FORMATTING → TEMPLATE_FIXING → [EXTERNAL_REVIEWING] → DONE
+     任意阶段异常 → ERROR
+```
+
+### 节点说明
 
 | 节点 | 模型 | 职责 |
 |------|------|------|
-| 命题 Agent | 大模型 | 根据主题 + 难度生成完整竞赛题（标题、题干、参考答案、评分标准） |
-| 数学验算 Agent | 大模型 | 验证代数 / 微积分推导、符号一致性 |
-| 物理验算 Agent | 大模型 | 验证物理模型、量纲、边界条件 |
-| 仲裁 Agent | 大模型 | 综合两份审核，输出 PASS / RETRY / ABORT 结构化裁决（含理由 + 错误分类）；重试上限后仅剩用语问题时自动 PASS_WITH_EDITS |
-| 正则隔离器 | — | 提取标题、Block 公式、Inline 公式、Figure 占位符 |
+| 命题规划 | 大模型 | 分析主题与难度，输出规划笔记（小问数量、分值分配、物理情境建议） |
+| 命题 Agent | 大模型 | 根据规划生成题干与小问，支持重试时接收仲裁反馈 |
+| 解题 Agent | 大模型 | 根据题干生成参考答案与评分点，解题与命题独立迭代 |
+| 数学审核 | 大模型 | 验证代数 / 微积分推导、符号一致性 |
+| 物理审核 | 大模型 | 验证物理模型、量纲、边界条件 |
+| 结构审核 | **纯规则** | 小问编号连续性、分值合计、block_math 配对、label 唯一性 |
+| 仲裁 Agent | 大模型 | 综合三份审核报告，通过 Function Calling 输出结构化裁决 |
+| 正则隔离器 | — | 提取标题、Block / Inline 公式、Figure 占位符 |
 | 格式化 Agent | 小模型 | 对占位符文本做 CPHOS LaTeX 排版（不接触数学公式） |
 | 回填器 | — | 公式回填、CPHOS 命令生成、交叉引用、插图占位 |
+| 模板修正 | **纯规则** | 校验 LaTeX 环境匹配、占位符残留、自动补 `\scoring` 和 `\documentclass` |
+| AI_Reviewer | 子进程 | 可选：调用 AI_Reviewer 外部审题工具，输出结构化反馈 |
+
+### 仲裁路由
+
+| 裁决 | 含义 | 路由 |
+|------|------|------|
+| `PASS` | 题目合格 | → 后处理流水线 |
+| `RETRY_PROBLEM` | 题干有误 | → 回到命题 Agent（重新出题） |
+| `RETRY_SOLUTION` | 解答有误 | → 回到解题 Agent（保留题干，重新解题） |
+| `ABORT` | 不可修复错误 | → 流程终止 |
+| *重试超限 + `style`* | 仅有用语问题 | → 自动切为 `PASS_WITH_EDITS` |
+
+---
+
+## 命题模式
+
+系统支持 4 种命题模式，所有模式共用同一条状态机工作流，差异仅在输入规格与规划提示词：
+
+| 模式 | CLI 用法 | 说明 |
+|------|---------|------|
+| `topic_generation` | `--topic "刚体力学"` | 自由命题：从主题出发创作全新竞赛题 |
+| `literature_adaptation` | `--adapt paper.pdf --mode literature_adaptation` | 文献改编：基于学术文献改编为竞赛题 |
+| `idea_expansion` | `--adapt sketch.txt --mode idea_expansion` | 思路拓展：从简要构想扩展为完整试题 |
+| `problem_enrichment` | `--adapt simple.tex --mode problem_enrichment` | 题目丰富：在简单题基础上增加考察深度 |
+
+不指定 `--mode` 时，系统根据是否提供 `--adapt` 自动推断。
+
+---
 
 ## 快速开始
 
 > 需要 Python ≥ 3.11 和 [uv](https://docs.astral.sh/uv/)。
 
-配置项目依赖：
 ```bash
+# 1. 安装依赖
 uv sync
-```
 
-快速运行示例：
-```bash
+# 2. 配置环境变量
 copy .env.example .env          # Windows
 # cp .env.example .env          # macOS / Linux
-# 编辑 .env，选择 LLM 服务商并填入对应密钥和模型名称
+# 编辑 .env，填入 LLM 服务商密钥和模型名称
 
-# 5. 运行
+# 3. 运行
 uv run physics-generator --topic "刚体力学与角动量守恒"
 uv run physics-generator --topic "电磁感应" --difficulty "省级竞赛"
 uv run physics-generator --topic "电磁感应" --score 60
 uv run physics-generator --input task.json
+uv run physics-generator --adapt existing_problem.tex --mode problem_enrichment
+uv run physics-generator --topic "相对论力学" --review   # 启用外部审题
 
-# 基于参考文献命题
-uv run physics-generator --topic "热辐射" --reference paper.pdf
-uv run physics-generator --topic "流体力学" --url "https://example.com/article"
-
-# 改编已有题目
-uv run physics-generator --adapt existing_problem.tex --difficulty "决赛"
-```
-
-运行测试：
-```bash
-# 6. 测试
+# 4. 测试
 uv run pytest -v
 ```
-
-### 环境变量
-
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `LLM_PROVIDER` | LLM 服务商 | `openrouter`（默认）/ `openai_compatible` |
-| `OPENROUTER_API_KEY` | OpenRouter API 密钥 | `sk-or-...` |
-| `LLM_API_KEY` | OpenAI 兼容 API 密钥（仅 `openai_compatible`） | `sk-...` |
-| `LLM_BASE_URL` | OpenAI 兼容 API 地址（仅 `openai_compatible`） | `https://api.deepseek.com/v1` |
-| `BIG_MODEL_NAME` | 大模型（命题 / 验算 / 仲裁） | `google/gemini-2.5-pro-preview` |
-| `SMALL_MODEL_NAME` | 小模型（格式化排版） | `openai/gpt-4o-mini` |
 
 ### CLI 参数
 
 ```
-physics-generator --topic TEXT           # 必填：物理主题（与 --input/--adapt 互斥）
+physics-generator --topic TEXT           # 物理主题（与 --input/--adapt 互斥）
                   --input FILE           # 从 JSON 文件加载（与 --topic/--adapt 互斥）
-                  --adapt FILE           # 基于已有题目改编（与 --topic/--input 互斥）
-                  --difficulty TEXT       # 可选，默认 "国家集训队"
-                  --score INT            # 可选，题目总分（20-80，默认 40）
-                  --reference FILE       # 参考文献文件（PDF/TXT/MD/TEX），可多次指定
-                  --url URL              # 参考网页 URL，可多次指定
+                  --adapt FILE           # 基于已有材料改编（与 --topic/--input 互斥）
+                  --difficulty TEXT       # 难度等级（默认: 国家集训队）
+                  --score INT            # 题目总分（20-80，默认: 50）
+                  --mode MODE            # 命题模式（topic_generation / literature_adaptation
+                                         #           / idea_expansion / problem_enrichment）
+                  --review               # 启用 AI_Reviewer 外部审题
                   --log                  # 追加运行记录到 TEST_LOG.md
 ```
 
-### 难度等级
+### 环境变量
 
-系统根据 `--difficulty` 参数自动映射到三个竞赛等级，影响命题、验算和仲裁的行为：
+复制 `.env.example` 为 `.env` 并填入配置：
 
-| 等级 | 触发关键词 | 物理范围 |
-|------|-----------|---------|
-| 复赛（fusai） | 复赛、省赛、省级、预赛 | 经典力学、基础热力学、几何光学、基础电磁学 |
-| 决赛（juesai） | 决赛（默认） | +完整电磁学、刚体、基础相对论、统计物理初步 |
-| 集训队（jixundui） | 集训、国家队、CMO、IPhO | 不设上限，但高级工具必须在题干给出 |
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `LLM_PROVIDER` | LLM 服务商 | `openrouter` |
+| `OPENROUTER_API_KEY` | OpenRouter API 密钥 | — |
+| `LLM_API_KEY` | OpenAI 兼容 API 密钥（仅 `openai_compatible`） | — |
+| `LLM_BASE_URL` | OpenAI 兼容 API 地址（仅 `openai_compatible`） | — |
+| `BIG_MODEL_NAME` | 大模型（命题 / 审核 / 仲裁） | — |
+| `SMALL_MODEL_NAME` | 小模型（格式化排版） | — |
+| `BIG_MODEL_TEMPERATURE` | 大模型温度 | `0.7` |
+| `BIG_MODEL_MAX_TOKENS` | 大模型最大 token 数 | `32768` |
+| `ARBITER_MAX_TOKENS` | 仲裁最大 token 数 | `4096` |
+| `SMALL_MODEL_TEMPERATURE` | 小模型温度 | `0.0` |
+| `SMALL_MODEL_MAX_TOKENS` | 小模型最大 token 数 | `8192` |
+| `MODEL_TIMEOUT` | HTTP 超时（秒） | `600` |
+| `MAX_RETRY_COUNT` | 仲裁最大重试轮数 | `3` |
+| `ENABLE_EXTERNAL_REVIEW` | 默认是否启用外部审题 | `false` |
+| `OUTPUT_DIR` | 输出目录 | `output` |
+
+---
 
 ## 项目结构
 
 ```
 AI_Question/
-├── pyproject.toml                # 项目元数据 & 依赖
-├── .env.example                  # 环境变量模板
+├── pyproject.toml                  # 项目元数据 & 依赖
+├── .env.example                    # 环境变量模板
 ├── src/
-│   ├── app/                      # CLI 入口与输出写入
-│   │   ├── __init__.py           # main(), _cli(), _write_outputs()
-│   │   └── __main__.py
-│   ├── client/                   # LLM 客户端（多服务商抽象）
-│   │   ├── __init__.py           # get_client() 工厂 + stream_chat() 兼容包装
-│   │   ├── base.py               # BaseLLMClient 抽象基类 + UsageInfo
-│   │   ├── openrouter.py         # OpenRouter 实现
-│   │   └── openai_compat.py      # 通用 OpenAI 兼容实现（DeepSeek 等）
-│   ├── config/                   # 全局配置
-│   │   └── settings.py           # 环境变量、模型参数、正则表达式、路径
-│   ├── prompts/                  # YAML 提示词管理
-│   │   ├── __init__.py           # load(agent, key, **kwargs) 加载器
-│   │   ├── generator.yaml        # 命题 Agent 提示词
-│   │   ├── verifier.yaml         # 数学 / 物理验算 Agent 提示词
-│   │   ├── arbiter.yaml          # 仲裁 Agent 提示词
-│   │   └── formatter.yaml        # 格式化 Agent 提示词
-│   ├── reader/                   # 参考资料读取器
-│   │   ├── __init__.py           # extract_content() 工厂 + 自动类型检测
-│   │   ├── base.py               # ReaderResult + truncate_content()
-│   │   ├── pdf_reader.py         # PyMuPDF 提取 PDF 文本
-│   │   ├── web_reader.py         # httpx + html2text 抓取网页
-│   │   ├── text_reader.py        # TXT/MD/TEX 直接读取
-│   │   └── problem_reader.py     # 改编模式（复用 text/pdf reader）
-│   ├── generator/                # 命题与审核 Agent
-│   │   ├── generator.py          # 命题 Agent（含难度分级逻辑）
-│   │   ├── math_verifier.py      # 数学验算 Agent
-│   │   ├── physics_verifier.py   # 物理验算 Agent
-│   │   └── arbiter.py            # 仲裁 Agent
-│   ├── formatter/                # 格式化流水线
-│   │   ├── parser.py             # 正则隔离器（标题 + Block + Inline + Figure 提取）
-│   │   ├── formatter.py          # 格式化 Agent（小模型 CPHOS LaTeX 排版）
-│   │   └── merger.py             # 回填器（公式回填 + CPHOS 命令 + 插图占位）
-│   ├── graph/                    # 工作流编排
-│   │   └── workflow.py           # 纯 Python 状态机（含并行验算）
-│   └── model/                    # 数据模型
-│       ├── state.py              # AgentState (TypedDict)
-│       ├── schema.py             # ArbiterDecision (Pydantic)
-│       └── stats.py              # 运行时 Token 统计
+│   ├── app/                        # CLI 入口与输出写入
+│   │   ├── __init__.py             #   main(), _cli(), _write_outputs()
+│   │   └── __main__.py             #   python -m app 入口
+│   │
+│   ├── engine/                     # 核心状态机
+│   │   └── state_machine.py        #   Phase(Enum) + GenerationStateMachine
+│   │
+│   ├── spec/                       # 输入规格 & 命题规划
+│   │   ├── task.py                 #   QuestionMode, DifficultyProfile, TaskSpec
+│   │   ├── normalizer.py           #   from_cli() / from_json() → WorkflowData
+│   │   └── planner.py              #   run_planning() — LLM 命题规划
+│   │
+│   ├── agents/                     # 各 Agent 实现（每个文件一个 Agent）
+│   │   ├── problem_generator.py    #   命题 Agent（生成题干 + 小问）
+│   │   ├── solution_generator.py   #   解题 Agent（生成答案 + 评分点）
+│   │   ├── reviewers.py            #   数学 / 物理 / 结构审核（并行执行）
+│   │   └── arbiter.py              #   仲裁 Agent（Function Calling 结构化裁决）
+│   │
+│   ├── latex/                      # LaTeX 后处理流水线
+│   │   ├── isolate.py              #   正则隔离器（Block + Inline + Figure 提取）
+│   │   ├── format.py               #   格式化 Agent（小模型 CPHOS 排版）
+│   │   ├── merge.py                #   回填器（公式编号 + CPHOS 命令 + 插图）
+│   │   └── template_agent.py       #   模板修正（规则检查 + 自动修复）
+│   │
+│   ├── integration/                # 外部系统集成
+│   │   ├── ai_reviewer.py          #   AI_Reviewer 子进程调用
+│   │   └── feedback.py             #   外部审核报告 → 反馈适配
+│   │
+│   ├── client/                     # LLM 客户端（多服务商抽象）
+│   │   ├── __init__.py             #   get_client() 工厂 + stream_chat() 包装
+│   │   ├── base.py                 #   BaseLLMClient 抽象基类 + UsageInfo
+│   │   ├── openrouter.py           #   OpenRouter 实现
+│   │   └── openai_compat.py        #   通用 OpenAI 兼容实现（DeepSeek 等）
+│   │
+│   ├── config/                     # 全局配置
+│   │   └── config.py               #   基于 .env 的配置管理
+│   │
+│   ├── model/                      # 数据模型
+│   │   ├── state.py                #   WorkflowData (TypedDict) — 全局流转数据
+│   │   ├── schema.py               #   ArbiterDecision, TemplateFixReport (Pydantic)
+│   │   └── stats.py                #   运行时 Token 统计
+│   │
+│   ├── prompts/                    # YAML 提示词
+│   │   ├── __init__.py             #   load(agent, key, **kwargs) 加载器
+│   │   ├── planning.yaml           #   命题规划提示词（4 种模式）
+│   │   ├── problem_generator.yaml  #   命题 Agent 提示词
+│   │   ├── solution_generator.yaml #   解题 Agent 提示词
+│   │   ├── reviewers.yaml          #   数学 / 物理审核提示词
+│   │   ├── arbiter.yaml            #   仲裁 Agent 提示词
+│   │   └── formatter.yaml          #   格式化 Agent 提示词
+│   │
+│   └── utils/                      # 工具函数
+│       └── files.py                #   write_text(), write_json()
+│
 └── tests/
-    ├── test_graph.py             # 端到端集成测试（Mock LLM）
-    ├── test_parser.py            # 正则隔离器单元测试
-    ├── test_merger.py            # 回填器单元测试
-    ├── topics.py                 # 测试用主题池加载器
+    ├── test_state_machine.py       # 状态机集成测试（Mock LLM）
+    ├── test_parser.py              # 正则隔离器单元测试
+    ├── test_merger.py              # 回填器单元测试
+    ├── topics.py                   # 测试用主题池加载器
     └── fixtures/
-        └── topics.js             # 物理命题主题数据
+        └── topics.js               # 物理命题主题数据
 ```
+
+---
 
 ## 输出文件
 
@@ -171,11 +242,13 @@ AI_Question/
 | 文件 | 内容 |
 |------|------|
 | `{task_id}_final.tex` | 可直接编译的 CPHOS LaTeX 成品 |
-| `{task_id}_draft.md` | 大模型原始草稿 |
+| `{task_id}_draft.md` | 大模型原始草稿（题干 + 解答） |
 | `{task_id}_tagged.md` | 占位符文本（调试用） |
-| `{task_id}_log.json` | 完整运行日志（裁决、理由、错误分类、审核意见、公式数等） |
-| `{task_id}_report.md` | 仲裁报告（无论何种裁决结果均生成） |
+| `{task_id}_log.json` | 完整运行日志（裁决、理由、审核意见、模板报告等） |
+| `{task_id}_report.md` | 仲裁报告 |
 | `{task_id}_assets/README.md` | 插图绘制需求（仅题目含图时生成） |
+
+---
 
 ## 提示词管理
 
@@ -185,24 +258,15 @@ AI_Question/
 from prompts import load
 
 # 加载系统提示词
-system = load("generator", "system_prompt")
+system = load("problem_generator", "system_prompt")
 
 # 加载用户提示词（带变量替换）
-user = load("generator", "user_prompt_initial", topic="电磁感应", difficulty="国家集训队")
+user = load("problem_generator", "user_prompt_topic", topic="电磁感应", difficulty="国家集训队")
 ```
 
 变量替换使用 `str.replace("{key}", value)`，仅替换显式传入的 key，LaTeX 花括号和占位符不受影响。
 
-## 技术栈
-
-| 组件 | 技术 |
-|------|------|
-| 运行时 | Python ≥ 3.11 |
-| 包管理 | uv + hatchling |
-| LLM 网关 | OpenRouter / OpenAI 兼容 API（openai SDK + 抽象基类） |
-| 结构化输出 | Pydantic + Function Calling |
-| 提示词管理 | PyYAML |
-| 测试 | pytest + unittest.mock |
+---
 
 ## 占位符处理流程
 
@@ -211,7 +275,10 @@ flowchart LR
     A["LLM 输出<br/>&lt;block_math label='eq:F'&gt;<br/>F = ma<br/>&lt;/block_math&gt;"] --> B["隔离器<br/>→ ｛｛BLOCK_MATH_1｝｝"]
     B --> C["小模型排版<br/>CPHOS LaTeX 结构化"]
     C --> D["回填器<br/>→ \\begin{equation}<br/>F = ma \\eqtag{1}<br/>\\end{equation}"]
+    D --> E["模板修正<br/>校验环境 + 补全命令"]
 ```
+
+---
 
 ## CPHOS 模板对齐
 
@@ -255,4 +322,18 @@ flowchart LR
 | `none` | 无错误 | 直接 PASS |
 | `style` | 仅用语规范问题 | RETRY；若达到重试上限则自动切换为 PASS_WITH_EDITS 通过 |
 | `fatal` | 数学 / 物理 / 逻辑错误 | RETRY → 超限后 ABORT |
+
+---
+
+## 技术栈
+
+| 组件 | 技术 |
+|------|------|
+| 运行时 | Python ≥ 3.11 |
+| 包管理 | uv + hatchling |
+| LLM 网关 | OpenRouter / OpenAI 兼容 API（openai SDK + 抽象基类） |
+| 结构化输出 | Pydantic + Function Calling |
+| 工作流编排 | 纯 Python 状态机（无第三方框架依赖） |
+| 提示词管理 | PyYAML |
+| 测试 | pytest + unittest.mock |
 

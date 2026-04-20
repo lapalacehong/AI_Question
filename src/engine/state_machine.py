@@ -1,0 +1,220 @@
+"""
+全局工作流状态机。
+
+参照 AI_Reviewer 状态机模式，管理生成工作流的阶段流转：
+  INIT → PLANNING → PROBLEM_GENERATING → SOLUTION_GENERATING
+       → REVIEWING → ARBITRATING
+       → FORMATTING → TEMPLATE_FIXING → [EXTERNAL_REVIEWING] → DONE
+
+仲裁路由：
+  PASS            → 进入后处理
+  RETRY_PROBLEM   → 回到 PROBLEM_GENERATING
+  RETRY_SOLUTION  → 回到 SOLUTION_GENERATING（保留题干）
+  ABORT           → ABORTED
+
+任意阶段异常 → ERROR
+"""
+from __future__ import annotations
+
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
+from enum import Enum, auto
+
+from model.state import WorkflowData
+from config.config import MAX_RETRY_COUNT, logger
+
+
+class Phase(Enum):
+    """工作流阶段。"""
+    INIT = auto()
+    PLANNING = auto()
+    PROBLEM_GENERATING = auto()
+    SOLUTION_GENERATING = auto()
+    REVIEWING = auto()
+    ARBITRATING = auto()
+    FORMATTING = auto()
+    TEMPLATE_FIXING = auto()
+    EXTERNAL_REVIEWING = auto()
+    DONE = auto()
+    ABORTED = auto()
+    ERROR = auto()
+
+
+# 合法仲裁决策
+_VALID_DECISIONS = ("PASS", "RETRY_PROBLEM", "RETRY_SOLUTION", "ABORT")
+
+
+class GenerationStateMachine:
+    """驱动命题生成工作流的状态机。"""
+
+    def __init__(self, *, enable_external_review: bool = False):
+        self._phase: Phase = Phase.INIT
+        self._start_time: float = 0.0
+        self._enable_external_review = enable_external_review
+
+    @property
+    def phase(self) -> Phase:
+        return self._phase
+
+    def _transition(self, to: Phase) -> None:
+        """执行阶段转移并记录日志。"""
+        logger.info("阶段转移: %s → %s", self._phase.name, to.name)
+        self._phase = to
+
+    # ------------------------------------------------------------------
+    # 路由
+    # ------------------------------------------------------------------
+
+    def _route(self, data: WorkflowData) -> str:
+        """仲裁后的条件路由。
+
+        返回值: "pass" | "pass_with_edits" | "retry_problem" | "retry_solution" | "abort" | "end"
+        """
+        decision = data.get("arbiter_decision", "RETRY_PROBLEM")
+        retry = data.get("retry_count", 0)
+        error_cat = data.get("error_category", "fatal")
+
+        if decision == "PASS":
+            logger.info("[router] PASS → 进入后处理流水线")
+            return "pass"
+
+        if decision == "ABORT":
+            logger.warning("[router] 仲裁判定 ABORT → 流程终止")
+            return "abort"
+
+        # RETRY_PROBLEM / RETRY_SOLUTION
+        if retry >= MAX_RETRY_COUNT:
+            if error_cat == "style":
+                logger.info("[router] 重试上限但仅有用语规范问题 → 视为通过（需人工修订）")
+                return "pass_with_edits"
+            logger.warning("[router] 达到最大重试 %d 次 → 强制终止", MAX_RETRY_COUNT)
+            return "end"
+
+        if decision == "RETRY_SOLUTION":
+            logger.info("[router] RETRY_SOLUTION → 回到解题生成 (已重试 %d 次)", retry)
+            return "retry_solution"
+
+        # RETRY_PROBLEM 或未识别值兜底
+        logger.info("[router] RETRY_PROBLEM → 回到命题生成 (已重试 %d 次)", retry)
+        return "retry_problem"
+
+    # ------------------------------------------------------------------
+    # 主流程
+    # ------------------------------------------------------------------
+
+    def run(self, data: WorkflowData) -> WorkflowData:
+        """驱动完整的生成工作流。"""
+        from spec.planner import run_planning
+        from agents.problem_generator import problem_generator_agent
+        from agents.solution_generator import solution_generator_agent
+        from agents.reviewers import run_reviews
+        from agents.arbiter import arbiter_agent
+        from latex.isolate import isolate
+        from latex.format import formatting_agent
+        from latex.merge import merge
+        from latex.template_agent import fix_template
+
+        self._start_time = time.monotonic()
+        data = dict(data)  # 允许修改
+
+        try:
+            # ===== 命题规划 =====
+            self._transition(Phase.PLANNING)
+            data.update(run_planning(data))
+
+            need_problem = True
+
+            while True:
+                # ===== 命题生成 =====
+                if need_problem:
+                    self._transition(Phase.PROBLEM_GENERATING)
+                    data.update(problem_generator_agent(data))
+
+                # ===== 解题生成 =====
+                self._transition(Phase.SOLUTION_GENERATING)
+                data.update(solution_generator_agent(data))
+
+                # 合并 problem_text + solution_text 供审核
+                data["draft_content"] = (
+                    data.get("problem_text", "")
+                    + "\n\n参考答案\n\n"
+                    + data.get("solution_text", "")
+                )
+
+                # ===== 并行审核 =====
+                self._transition(Phase.REVIEWING)
+                data.update(run_reviews(data))
+
+                # ===== 仲裁 =====
+                self._transition(Phase.ARBITRATING)
+                data.update(arbiter_agent(data))
+
+                # ===== 路由 =====
+                route = self._route(data)
+
+                if route in ("pass", "pass_with_edits"):
+                    if route == "pass_with_edits":
+                        data["arbiter_decision"] = "PASS_WITH_EDITS"
+                    break
+                elif route == "abort":
+                    self._transition(Phase.ABORTED)
+                    return data
+                elif route == "end":
+                    return data
+                elif route == "retry_solution":
+                    need_problem = False
+                else:
+                    # retry_problem
+                    need_problem = True
+
+            # ===== LaTeX 后处理流水线 =====
+            self._transition(Phase.FORMATTING)
+            data.update(isolate(data))
+            data.update(formatting_agent(data))
+            data.update(merge(data))
+
+            # ===== 模板修正 =====
+            self._transition(Phase.TEMPLATE_FIXING)
+            data.update(fix_template(data))
+
+            # ===== 外部审题（可选） =====
+            if self._enable_external_review:
+                self._transition(Phase.EXTERNAL_REVIEWING)
+                data = self._run_external_review(data)
+
+            self._transition(Phase.DONE)
+            elapsed = time.monotonic() - self._start_time
+            logger.info("生成完成，总耗时 %.2f 秒", elapsed)
+            return data
+
+        except Exception:
+            self._transition(Phase.ERROR)
+            elapsed = time.monotonic() - self._start_time
+            logger.exception("生成流程出错 (已耗时 %.2f 秒)", elapsed)
+            raise
+
+    def _run_external_review(self, data: WorkflowData) -> WorkflowData:
+        """调用 AI_Reviewer 外部审题并适配反馈。"""
+        from integration.ai_reviewer import run_ai_reviewer
+        from integration.feedback import adapt_feedback
+
+        review_result = run_ai_reviewer(data)
+        data.update(adapt_feedback(data, review_result))
+
+        ext_decision = data.get("external_decision", "")
+
+        if ext_decision == "accepted":
+            logger.info("[external] 外部审题通过")
+        elif ext_decision == "needs_revision":
+            logger.info("[external] 外部审题要求修订 → 将由调用方决定是否重跑")
+        elif ext_decision == "rejected":
+            logger.warning("[external] 外部审题拒绝")
+
+        return data
+
+
+def build_graph(*, enable_external_review: bool = False) -> GenerationStateMachine:
+    """构建并返回工作流状态机。"""
+    logger.info("[workflow] 工作流状态机构建完成")
+    return GenerationStateMachine(enable_external_review=enable_external_review)
