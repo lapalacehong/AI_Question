@@ -44,7 +44,11 @@ def _strip_thinking_chain(content: str) -> str:
 
 
 def problem_generator_agent(data: WorkflowData) -> dict:
-    """命题生成节点：调用大模型生成题干与小问结构。"""
+    """命题生成节点：调用大模型生成题干与小问结构。
+
+    retry 语义：`problem_retry_count` 由仲裁 Agent 在返回 `RETRY_PROBLEM` 时 +1。
+    首轮生成读到 0，重试时读到 >=1，此节点不主动修改该计数器。
+    """
     retry = data.get("problem_retry_count", 0)
     logger.info("[problem_gen] 进入命题生成节点 | retry=%d", retry)
 
@@ -120,8 +124,7 @@ def problem_generator_agent(data: WorkflowData) -> dict:
     return {
         "title": title,
         "problem_text": content,
-        "problem_retry_count": retry + 1,
-        # 清空上轮审核
+        # 清空上轮审核（本轮审核结果尚未产出）
         "math_review": "",
         "physics_review": "",
         "structure_review": "",

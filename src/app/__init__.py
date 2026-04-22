@@ -96,7 +96,8 @@ def _write_outputs(task_id: str, final_state: WorkflowData) -> dict[str, Path]:
         f"- **裁决**: {decision_label}\n",
         f"- **错误类别**: {final_state.get('error_category', 'N/A')}\n",
         f"- **理由**: {final_state.get('arbiter_reason', '')}\n",
-        f"- **重试次数**: {final_state.get('retry_count', 0)}\n\n",
+        f"- **重试次数**: {final_state.get('retry_count', 0)} "
+        f"(命题 {final_state.get('problem_retry_count', 0)} / 解题 {final_state.get('solution_retry_count', 0)})\n\n",
         f"## 数学审核意见\n\n",
         f"{final_state.get('math_review', '无')}\n\n",
         f"## 物理审核意见\n\n",
@@ -270,7 +271,10 @@ def main(topic: str, difficulty: str = "国家集训队", *,
     print("任务执行完成")
     print(f"   任务 ID:   {task_id}")
     print(f"   最终裁决:   {final_state.get('arbiter_decision', 'N/A')}")
-    print(f"   重试次数:   {final_state.get('retry_count', 0)}")
+    print(
+        f"   重试次数:   {final_state.get('retry_count', 0)} "
+        f"(命题 {final_state.get('problem_retry_count', 0)} / 解题 {final_state.get('solution_retry_count', 0)})"
+    )
     print(f"   Block 公式: {len(final_state.get('formula_dict', {}))} 个")
     print(f"   Inline公式: {len(final_state.get('inline_dict', {}))} 个")
     tok = get_total_tokens()

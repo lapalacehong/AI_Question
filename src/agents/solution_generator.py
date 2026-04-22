@@ -15,7 +15,11 @@ from prompts import load
 
 
 def solution_generator_agent(data: WorkflowData) -> dict:
-    """解题生成节点：根据题干生成参考答案和评分点。"""
+    """解题生成节点：根据题干生成参考答案和评分点。
+
+    retry 语义：`solution_retry_count` 由仲裁 Agent 在返回 `RETRY_SOLUTION` 时 +1。
+    首轮生成读到 0，重试时读到 >=1，此节点不主动修改该计数器。
+    """
     retry = data.get("solution_retry_count", 0)
     logger.info("[solution_gen] 进入解题生成节点 | retry=%d", retry)
 
@@ -63,5 +67,4 @@ def solution_generator_agent(data: WorkflowData) -> dict:
 
     return {
         "solution_text": content,
-        "solution_retry_count": retry + 1,
     }

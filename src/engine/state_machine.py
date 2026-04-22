@@ -69,10 +69,16 @@ class GenerationStateMachine:
     def _route(self, data: WorkflowData) -> str:
         """仲裁后的条件路由。
 
+        采用分阶段计数：RETRY_PROBLEM 和 RETRY_SOLUTION 的上限独立统计，
+        命中当前阶段上限时才熔断。另外 `retry_count`（总重试次数）
+        仍设 2×MAX_RETRY_COUNT 的硬上限兜底，避免两阶段交替震荡。
+
         返回值: "pass" | "pass_with_edits" | "retry_problem" | "retry_solution" | "abort" | "end"
         """
         decision = data.get("arbiter_decision", "RETRY_PROBLEM")
-        retry = data.get("retry_count", 0)
+        prob_retry = data.get("problem_retry_count", 0)
+        sol_retry = data.get("solution_retry_count", 0)
+        total_retry = data.get("retry_count", prob_retry + sol_retry)
         error_cat = data.get("error_category", "fatal")
 
         if decision == "PASS":
@@ -83,20 +89,39 @@ class GenerationStateMachine:
             logger.warning("[router] 仲裁判定 ABORT → 流程终止")
             return "abort"
 
-        # RETRY_PROBLEM / RETRY_SOLUTION
-        if retry >= MAX_RETRY_COUNT:
+        # 当前阶段是否已达上限
+        stage_exhausted = (
+            (decision == "RETRY_PROBLEM" and prob_retry >= MAX_RETRY_COUNT)
+            or (decision == "RETRY_SOLUTION" and sol_retry >= MAX_RETRY_COUNT)
+        )
+        # 总次数硬熔断，防止两阶段交替重试无限循环
+        total_exhausted = total_retry >= 2 * MAX_RETRY_COUNT
+
+        if stage_exhausted or total_exhausted:
             if error_cat == "style":
-                logger.info("[router] 重试上限但仅有用语规范问题 → 视为通过（需人工修订）")
+                logger.info(
+                    "[router] 重试上限(problem=%d, solution=%d, total=%d)但仅有用语规范问题 → PASS_WITH_EDITS",
+                    prob_retry, sol_retry, total_retry,
+                )
                 return "pass_with_edits"
-            logger.warning("[router] 达到最大重试 %d 次 → 强制终止", MAX_RETRY_COUNT)
+            logger.warning(
+                "[router] 达到最大重试次数 (problem=%d/%d, solution=%d/%d, total=%d) → 强制终止",
+                prob_retry, MAX_RETRY_COUNT, sol_retry, MAX_RETRY_COUNT, total_retry,
+            )
             return "end"
 
         if decision == "RETRY_SOLUTION":
-            logger.info("[router] RETRY_SOLUTION → 回到解题生成 (已重试 %d 次)", retry)
+            logger.info(
+                "[router] RETRY_SOLUTION → 回到解题生成 (solution_retry=%d)",
+                sol_retry,
+            )
             return "retry_solution"
 
         # RETRY_PROBLEM 或未识别值兜底
-        logger.info("[router] RETRY_PROBLEM → 回到命题生成 (已重试 %d 次)", retry)
+        logger.info(
+            "[router] RETRY_PROBLEM → 回到命题生成 (problem_retry=%d)",
+            prob_retry,
+        )
         return "retry_problem"
 
     # ------------------------------------------------------------------

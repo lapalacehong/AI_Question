@@ -55,10 +55,12 @@ class WorkflowData(TypedDict):
     external_feedback: str       # AI_Reviewer 返回的审题反馈
     external_decision: str       # "accepted" | "needs_revision" | "rejected" | ""
 
-    # ===== 元数据 =====
-    retry_count: int             # 总重试次数
-    problem_retry_count: int     # 命题重试次数
-    solution_retry_count: int    # 解题重试次数
+    # ===== 元数据（分阶段重试计数） =====
+    # 三个计数器均由仲裁 Agent 在做出裁决后统一写入；命题 / 解题 Agent 不修改。
+    # 首轮生成不计 retry：仅当仲裁返回 RETRY_PROBLEM / RETRY_SOLUTION 时对应阶段 +1。
+    retry_count: int             # = problem_retry_count + solution_retry_count（展示用）
+    problem_retry_count: int     # 命题阶段被要求重新生成的次数
+    solution_retry_count: int    # 解题阶段被要求重新生成的次数
 
 
 # 向后兼容别名

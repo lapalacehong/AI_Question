@@ -2,7 +2,12 @@
 仲裁 Agent。
 使用 OpenAI Function Calling 确保输出可解析。
 裁决类型: PASS / RETRY_PROBLEM / RETRY_SOLUTION / ABORT。
-每次执行 retry_count += 1。
+
+重试计数语义（分阶段计数）：
+  - `RETRY_PROBLEM` → problem_retry_count += 1
+  - `RETRY_SOLUTION` → solution_retry_count += 1
+  - `PASS` / `ABORT` → 不递增（首轮直接通过不计 retry）
+  - `retry_count` 是两者之和，只作为总重试次数的元数据展示。
 """
 import json
 import re
@@ -10,7 +15,7 @@ import time
 
 from model.state import WorkflowData
 from model.schema import ArbiterDecision
-from model.stats import record
+from model.stats import record, get_all as _get_stats
 from client import get_client
 from config.config import (
     BIG_MODEL_NAME, ARBITER_MAX_TOKENS, logger,
@@ -132,11 +137,27 @@ def arbiter_agent(data: WorkflowData) -> dict:
         feedback = f"[系统错误] 仲裁解析失败，强制重试。异常: {str(e)}"
         error_category = "fatal"
 
-    new_retry = data.get("retry_count", 0) + 1
-    logger.info("[arbiter] 裁决=%s | 理由=%s | retry_count→%d", decision, reason[:80], new_retry)
+    # ===== 分阶段重试计数 =====
+    # 只有实际触发 RETRY_* 才递增对应阶段计数；PASS / ABORT 不计。
+    prob_retry = data.get("problem_retry_count", 0)
+    sol_retry = data.get("solution_retry_count", 0)
 
+    if decision == "RETRY_PROBLEM":
+        prob_retry += 1
+    elif decision == "RETRY_SOLUTION":
+        sol_retry += 1
+
+    total_retry = prob_retry + sol_retry
+    logger.info(
+        "[arbiter] 裁决=%s | 理由=%s | problem_retry=%d solution_retry=%d (total=%d)",
+        decision, reason[:80], prob_retry, sol_retry, total_retry,
+    )
+
+    # 统计 key 使用独立的"本轮仲裁次数"（按现有 arbiter_r* 数 +1），
+    # 避免 PASS/ABORT 不递增 total_retry 时覆盖上一轮的统计记录。
+    arb_seq = sum(1 for k in _get_stats() if k.startswith("arbiter_r")) + 1
     record(
-        f"arbiter_r{new_retry}", 0, elapsed, extra=decision,
+        f"arbiter_r{arb_seq}", 0, elapsed, extra=decision,
         prompt_tokens=p_tok, completion_tokens=c_tok, total_tokens=t_tok,
     )
 
@@ -145,5 +166,7 @@ def arbiter_agent(data: WorkflowData) -> dict:
         "arbiter_reason": reason,
         "arbiter_feedback": feedback,
         "error_category": error_category,
-        "retry_count": new_retry,
+        "problem_retry_count": prob_retry,
+        "solution_retry_count": sol_retry,
+        "retry_count": total_retry,
     }
