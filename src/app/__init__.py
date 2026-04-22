@@ -153,19 +153,34 @@ def _append_test_log(
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     status = "❌ 失败" if error_msg else "✅ 成功"
 
+    # 动态遍历：按前缀分组，保证分阶段计数 / 多轮仲裁下的全部统计都能显示。
+    def _sorted_keys(prefix: str) -> list[str]:
+        import re as _re
+        def _suffix_num(k: str) -> int:
+            m = _re.search(r'(\d+)$', k)
+            return int(m.group(1)) if m else 0
+        return sorted([k for k in stats if k.startswith(prefix)], key=_suffix_num)
+
+    ordered_keys: list[str] = []
+    ordered_keys += _sorted_keys("planner")
+    ordered_keys += _sorted_keys("problem_gen_r")
+    ordered_keys += _sorted_keys("solution_gen_r")
+    for k in ("math_check", "physics_check"):
+        if k in stats:
+            ordered_keys.append(k)
+    ordered_keys += _sorted_keys("arbiter_r")
+    for k in ("formatter", "template_agent"):
+        if k in stats:
+            ordered_keys.append(k)
+
     node_lines = []
-    for key in ["problem_gen_r0", "problem_gen_r1", "problem_gen_r2",
-                 "solution_gen_r0", "solution_gen_r1", "solution_gen_r2",
-                 "math_check", "physics_check",
-                 "arbiter_r1", "arbiter_r2", "arbiter_r3",
-                 "formatter"]:
-        if key in stats:
-            s = stats[key]
-            extra = f" ({s['extra']})" if s.get("extra") else ""
-            tok_info = ""
-            if s.get("total_tokens"):
-                tok_info = f" | tokens: {s['prompt_tokens']}+{s['completion_tokens']}={s['total_tokens']}"
-            node_lines.append(f"- {key}: {s['chars']} 字符 ({s['elapsed']:.0f}s){tok_info}{extra}")
+    for key in ordered_keys:
+        s = stats[key]
+        extra = f" ({s['extra']})" if s.get("extra") else ""
+        tok_info = ""
+        if s.get("total_tokens"):
+            tok_info = f" | tokens: {s['prompt_tokens']}+{s['completion_tokens']}={s['total_tokens']}"
+        node_lines.append(f"- {key}: {s['chars']} 字符 ({s['elapsed']:.0f}s){tok_info}{extra}")
 
     nodes_text = "\n".join(node_lines) if node_lines else "- （无数据）"
     tok = get_total_tokens()
@@ -215,6 +230,36 @@ def _append_test_log(
     logger.info(f"[TEST_LOG] Run #{run_num} 已追加到 {log_path}")
 
 
+# ============ 控制台摘要 ============
+
+def _print_summary(
+    task_id: str,
+    final_state: WorkflowData,
+    output_paths: dict[str, Path],
+    error_msg: str = "",
+) -> None:
+    """统一的结束摘要，供 --topic / --adapt / --input 三条路径共用。"""
+    print(f"\n{'='*60}")
+    print("任务执行完成" if not error_msg else "任务执行失败")
+    print(f"   任务 ID:   {task_id}")
+    if error_msg:
+        print(f"   失败原因:   {error_msg}")
+    print(f"   最终裁决:   {final_state.get('arbiter_decision', 'N/A')}")
+    print(
+        f"   重试次数:   {final_state.get('retry_count', 0)} "
+        f"(命题 {final_state.get('problem_retry_count', 0)} / 解题 {final_state.get('solution_retry_count', 0)})"
+    )
+    print(f"   Block 公式: {len(final_state.get('formula_dict', {}))} 个")
+    print(f"   Inline公式: {len(final_state.get('inline_dict', {}))} 个")
+    tok = get_total_tokens()
+    print(f"   Token用量:  prompt={tok['prompt_tokens']} + completion={tok['completion_tokens']} = {tok['total_tokens']}")
+    if output_paths:
+        print("   输出文件:")
+        for name, path in output_paths.items():
+            print(f"     [{name}] {path}")
+    print(f"{'='*60}")
+
+
 # ============ 主函数 ============
 
 def main(topic: str, difficulty: str = "国家集训队", *,
@@ -254,7 +299,7 @@ def main(topic: str, difficulty: str = "国家集训队", *,
 
     total_elapsed = time.time() - t_start
 
-    output_paths = {}
+    output_paths: dict[str, Path] = {}
     if not error_msg:
         logger.info("推理完成，导出产物...")
         output_paths = _write_outputs(task_id, final_state)
@@ -267,22 +312,7 @@ def main(topic: str, difficulty: str = "国家集训队", *,
             final_state=final_state, error_msg=error_msg,
         )
 
-    print(f"\n{'='*60}")
-    print("任务执行完成")
-    print(f"   任务 ID:   {task_id}")
-    print(f"   最终裁决:   {final_state.get('arbiter_decision', 'N/A')}")
-    print(
-        f"   重试次数:   {final_state.get('retry_count', 0)} "
-        f"(命题 {final_state.get('problem_retry_count', 0)} / 解题 {final_state.get('solution_retry_count', 0)})"
-    )
-    print(f"   Block 公式: {len(final_state.get('formula_dict', {}))} 个")
-    print(f"   Inline公式: {len(final_state.get('inline_dict', {}))} 个")
-    tok = get_total_tokens()
-    print(f"   Token用量:  prompt={tok['prompt_tokens']} + completion={tok['completion_tokens']} = {tok['total_tokens']}")
-    print("   输出文件:")
-    for name, path in output_paths.items():
-        print(f"     [{name}] {path}")
-    print(f"{'='*60}")
+    _print_summary(task_id, final_state, output_paths, error_msg)
 
 
 def _cli() -> None:
@@ -317,20 +347,37 @@ def _cli() -> None:
         compiled_graph = build_graph(enable_external_review=args.review)
         clear_run_stats()
         task_id = f"task_{uuid.uuid4().hex[:8]}"
+        logger.info(f"{'='*60}")
+        logger.info(
+            "系统启动 | input=%s | topic=%s | task_id=%s",
+            args.input, data.get("topic", "")[:60], task_id,
+        )
+        logger.info(f"{'='*60}")
+
         t_start = time.time()
+        error_msg = ""
+        final_state = data
         try:
             final_state = compiled_graph.run(data)
         except Exception as e:
-            logger.error("执行异常: %s", e)
-            return
+            error_msg = f"{type(e).__name__}: {e}"
+            logger.error("执行异常: %s", error_msg)
         total_elapsed = time.time() - t_start
-        _write_outputs(task_id, final_state)
+
+        output_paths: dict[str, Path] = {}
+        if not error_msg:
+            logger.info("推理完成，导出产物...")
+            output_paths = _write_outputs(task_id, final_state)
+
         if args.log:
             _append_test_log(
                 topic=data.get("topic", ""), difficulty=data.get("difficulty", ""),
                 model=BIG_MODEL_NAME, max_tokens=BIG_MODEL_MAX_TOKENS,
-                total_elapsed=total_elapsed, final_state=final_state, error_msg="",
+                total_elapsed=total_elapsed,
+                final_state=final_state, error_msg=error_msg,
             )
+
+        _print_summary(task_id, final_state, output_paths, error_msg)
     elif args.adapt:
         topic = Path(args.adapt).stem
         main(topic, args.difficulty, total_score=args.score,

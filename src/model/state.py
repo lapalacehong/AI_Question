@@ -61,7 +61,3 @@ class WorkflowData(TypedDict):
     retry_count: int             # = problem_retry_count + solution_retry_count（展示用）
     problem_retry_count: int     # 命题阶段被要求重新生成的次数
     solution_retry_count: int    # 解题阶段被要求重新生成的次数
-
-
-# 向后兼容别名
-AgentState = WorkflowData
