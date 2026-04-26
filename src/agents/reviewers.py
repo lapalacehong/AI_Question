@@ -1,12 +1,18 @@
 """
 审核 Agent 统一入口。
 包含数学检查、物理检查、结构检查三个子 Agent，并行执行。
+
+数据归属（参见 model/state.py）：
+  - 读取：GenerationOutput.draft_content / problem_text / solution_text
+    + TaskInput.total_score
+  - 写入：ReviewOutput 的三个字段（math_review / physics_review / structure_review）
+    分别由三个互斥子 Agent 写入（无写冲突）。
 """
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from model.state import WorkflowData
+from model.state import WorkflowData, ReviewOutput
 from model.stats import record
 from client import get_client, stream_chat
 from config.config import BIG_MODEL_NAME, BIG_MODEL_MAX_TOKENS, logger
@@ -17,7 +23,7 @@ from prompts import load
 # 数学检查
 # ------------------------------------------------------------------
 
-def _math_check(data: WorkflowData) -> dict:
+def _math_check(data: WorkflowData) -> ReviewOutput:
     """数学检查：验证解答中所有数学推导的正确性。"""
     logger.info("[math_check] 进入数学检查节点")
     client = get_client()
@@ -49,7 +55,7 @@ def _math_check(data: WorkflowData) -> dict:
 # 物理检查
 # ------------------------------------------------------------------
 
-def _physics_check(data: WorkflowData) -> dict:
+def _physics_check(data: WorkflowData) -> ReviewOutput:
     """物理检查：验证题目的物理正确性、量纲一致性和模型自洽性。"""
     logger.info("[physics_check] 进入物理检查节点")
     client = get_client()
@@ -81,7 +87,7 @@ def _physics_check(data: WorkflowData) -> dict:
 # 结构检查（纯规则，不调用 LLM）
 # ------------------------------------------------------------------
 
-def _structure_check(data: WorkflowData) -> dict:
+def _structure_check(data: WorkflowData) -> ReviewOutput:
     """结构检查：验证小问编号、分值一致性和标签完整性。"""
     logger.info("[structure_check] 进入结构检查节点")
     issues: list[str] = []
@@ -133,8 +139,11 @@ def _structure_check(data: WorkflowData) -> dict:
 # 并行入口
 # ------------------------------------------------------------------
 
-def run_reviews(data: WorkflowData) -> dict:
-    """并行执行数学检查、物理检查和结构检查。"""
+def run_reviews(data: WorkflowData) -> ReviewOutput:
+    """并行执行数学检查、物理检查和结构检查。
+
+    返回完整的 `ReviewOutput`（三个字段都有值）。
+    """
     logger.info("[reviewers] 启动并行审核")
 
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -142,7 +151,7 @@ def run_reviews(data: WorkflowData) -> dict:
         phys_future = executor.submit(_physics_check, dict(data))
         struct_future = executor.submit(_structure_check, dict(data))
 
-        result = {}
+        result: ReviewOutput = {}
         result.update(math_future.result())
         result.update(phys_future.result())
         result.update(struct_future.result())

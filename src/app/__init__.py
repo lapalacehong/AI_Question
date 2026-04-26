@@ -8,6 +8,8 @@
     uv run physics-generator --adapt source.txt
     uv run physics-generator --adapt source.txt --mode idea_expansion
 """
+# 注：本系统不集成任何外部审题工具（如 ai-reviewer CLI）。
+# 所有审核（数学 / 物理 / 结构 / 仲裁）均在状态机内由本仓库的 Agent 完成。
 import json
 import uuid
 import time
@@ -64,7 +66,6 @@ def _write_outputs(task_id: str, final_state: WorkflowData) -> dict[str, Path]:
         "physics_review": final_state.get("physics_review", ""),
         "structure_review": final_state.get("structure_review", ""),
         "template_report": final_state.get("template_report", ""),
-        "external_decision": final_state.get("external_decision", ""),
         "block_formula_count": len(final_state.get("formula_dict", {})),
         "inline_formula_count": len(final_state.get("inline_dict", {})),
         "figure_count": len(final_state.get("figure_descriptions", {})),
@@ -263,10 +264,9 @@ def _print_summary(
 # ============ 主函数 ============
 
 def main(topic: str, difficulty: str = "国家集训队", *,
-         total_score: int = 50, write_log: bool = False,
+         total_score: int = 40, write_log: bool = False,
          source_file: str | None = None,
-         mode: str | None = None,
-         enable_review: bool = False) -> None:
+         mode: str | None = None) -> None:
     """主函数：构建状态机 → 执行 → 写出"""
 
     task_id = f"task_{uuid.uuid4().hex[:8]}"
@@ -283,7 +283,7 @@ def main(topic: str, difficulty: str = "国家集训队", *,
     )
 
     logger.info("构建工作流状态机...")
-    compiled_graph = build_graph(enable_external_review=enable_review)
+    compiled_graph = build_graph()
     clear_run_stats()
 
     logger.info("开始执行推理流（可能需要数分钟）...")
@@ -329,14 +329,12 @@ def _cli() -> None:
                        help="基于已有材料改编（文件路径）")
     parser.add_argument("--difficulty", type=str, default="国家集训队",
                         help="难度等级（默认: 国家集训队）")
-    parser.add_argument("--score", type=int, default=50,
-                        help="题目总分（20-80，默认: 50）")
+    parser.add_argument("--score", type=int, default=40,
+                        help="题目总分（20-80，默认: 40）")
     parser.add_argument("--mode", type=str, default=None,
                         choices=["topic_generation", "literature_adaptation",
                                  "idea_expansion", "problem_enrichment"],
                         help="命题模式（默认自动推断）")
-    parser.add_argument("--review", action="store_true",
-                        help="启用 AI_Reviewer 外部审题")
     parser.add_argument("--log", action="store_true",
                         help="追加运行记录到 TEST_LOG.md")
 
@@ -344,7 +342,7 @@ def _cli() -> None:
 
     if args.input:
         data = from_json(args.input)
-        compiled_graph = build_graph(enable_external_review=args.review)
+        compiled_graph = build_graph()
         clear_run_stats()
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         logger.info(f"{'='*60}")
@@ -381,11 +379,10 @@ def _cli() -> None:
     elif args.adapt:
         topic = Path(args.adapt).stem
         main(topic, args.difficulty, total_score=args.score,
-             write_log=args.log, source_file=args.adapt, mode=args.mode,
-             enable_review=args.review)
+             write_log=args.log, source_file=args.adapt, mode=args.mode)
     else:
         main(args.topic, args.difficulty, total_score=args.score,
-             write_log=args.log, mode=args.mode, enable_review=args.review)
+             write_log=args.log, mode=args.mode)
 
 
 if __name__ == "__main__":

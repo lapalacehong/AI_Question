@@ -2,11 +2,17 @@
 命题生成 Agent。
 输出题干 + 小问结构（problem_text）。
 不包含参考答案——解题由 solution_generator 独立完成。
+
+数据归属（参见 model/state.py）：
+  - 读取：TaskInput.* + ArbitrationOutput.arbiter_feedback / problem_retry_count
+  - 写入：GenerationOutput 的 title / problem_text 字段；并主动清空上一轮
+    ReviewOutput（math_review / physics_review / structure_review），避免
+    旧审核串味。
 """
 import re
 import time
 
-from model.state import WorkflowData
+from model.state import WorkflowData, GenerationOutput, ReviewOutput
 from model.stats import record
 from client import get_client, stream_chat
 from config.config import (
@@ -48,6 +54,13 @@ def problem_generator_agent(data: WorkflowData) -> dict:
 
     retry 语义：`problem_retry_count` 由仲裁 Agent 在返回 `RETRY_PROBLEM` 时 +1。
     首轮生成读到 0，重试时读到 >=1，此节点不主动修改该计数器。
+
+    返回字段同时覆盖两个阶段记录的子集（参见 model/state.py）：
+      - `GenerationOutput`: title, problem_text
+      - `ReviewOutput`: math_review / physics_review / structure_review 清零
+
+    所以这里返回宽松的 `dict`（实质是 `GenerationOutput` ∪ `ReviewOutput` 子集），
+    由状态机 `data.update(...)` 合并。
     """
     retry = data.get("problem_retry_count", 0)
     logger.info("[problem_gen] 进入命题生成节点 | retry=%d", retry)

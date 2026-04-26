@@ -62,7 +62,6 @@ MODEL_TIMEOUT: int = int(os.getenv("MODEL_TIMEOUT", "600"))
 
 # ============ 流程控制 ============
 MAX_RETRY_COUNT: int = int(os.getenv("MAX_RETRY_COUNT", "3"))
-ENABLE_EXTERNAL_REVIEW: bool = os.getenv("ENABLE_EXTERNAL_REVIEW", "false").lower() == "true"
 
 # ============ 占位符前后缀 ============
 BLOCK_PLACEHOLDER_PREFIX: str = "{{BLOCK_MATH_"

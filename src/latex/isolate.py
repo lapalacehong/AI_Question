@@ -2,10 +2,15 @@
 正则隔离器（纯 Python，不调用任何 LLM）。
 三重隔离：先提取 Figure，再提取 Block 公式，最后提取 Inline 公式，防止嵌套污染。
 使用 reversed() 从后向前替换，确保前面的 match.start()/end() 不会因替换而偏移。
+
+数据归属（参见 model/state.py）：
+  - 读取：GenerationOutput.draft_content
+  - 写入：LaTeXOutput.{formula_dict, inline_dict, figure_dict, tagged_text,
+    figure_descriptions}
 """
 import re
 
-from model.state import WorkflowData
+from model.state import WorkflowData, LaTeXOutput
 from config.config import (
     BLOCK_MATH_PATTERN, BLOCK_PLACEHOLDER_PREFIX, BLOCK_PLACEHOLDER_SUFFIX,
     INLINE_MATH_PATTERN, INLINE_PLACEHOLDER_PREFIX, INLINE_PLACEHOLDER_SUFFIX,
@@ -26,7 +31,7 @@ def _sanitize_block_tags(text: str) -> str:
     return text
 
 
-def isolate(data: WorkflowData) -> dict:
+def isolate(data: WorkflowData) -> LaTeXOutput:
     """
     正则隔离器：
     Phase 0: 预处理修正 LLM 常见的标签格式错误

@@ -2,11 +2,15 @@
 LaTeX 模板检查与调整。
 先用规则检查缺失环境、分值不一致、残留占位符等问题，
 再用 Agent 修复结构性排版问题。
-输出可交给 AI_Reviewer 解析的 TeX。
+输出 CPHOS 模板兼容的 .tex 文件。
+
+数据归属（参见 model/state.py）：
+  - 读取：LaTeXOutput.final_latex（由 merge 写入）
+  - 写入：LaTeXOutput.{final_latex（覆盖）, template_report}
 """
 import re
 
-from model.state import WorkflowData
+from model.state import WorkflowData, LaTeXOutput
 from config.config import logger
 
 
@@ -69,7 +73,7 @@ def _auto_fix(latex: str, issues: list[str]) -> tuple[str, list[str]]:
     return latex, fixes
 
 
-def fix_template(data: WorkflowData) -> dict:
+def fix_template(data: WorkflowData) -> LaTeXOutput:
     """
     模板修正节点：
     1. 规则检查

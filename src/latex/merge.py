@@ -1,14 +1,18 @@
 """
 回填器（纯 Python，不调用任何 LLM）。
 将 formatted_text 中的占位符替换回原始数学公式，使用 CPHOS 模板命令。
+
+数据归属（参见 model/state.py）：
+  - 读取：LaTeXOutput.{formatted_text, formula_dict, inline_dict, figure_dict}
+  - 写入：LaTeXOutput.final_latex
 """
 import re
 
-from model.state import WorkflowData
+from model.state import WorkflowData, LaTeXOutput
 from config.config import logger
 
 
-def merge(data: WorkflowData) -> dict:
+def merge(data: WorkflowData) -> LaTeXOutput:
     """
     回填器（CPHOS 模板对齐）：
     1. 按文档顺序收集占位符，建立 label → 公式编号映射

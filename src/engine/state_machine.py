@@ -4,7 +4,7 @@
 参照 AI_Reviewer 状态机模式，管理生成工作流的阶段流转：
   INIT → PLANNING → PROBLEM_GENERATING → SOLUTION_GENERATING
        → REVIEWING → ARBITRATING
-       → FORMATTING → TEMPLATE_FIXING → [EXTERNAL_REVIEWING] → DONE
+       → FORMATTING → TEMPLATE_FIXING → DONE
 
 仲裁路由：
   PASS            → 进入后处理
@@ -35,7 +35,6 @@ class Phase(Enum):
     ARBITRATING = auto()
     FORMATTING = auto()
     TEMPLATE_FIXING = auto()
-    EXTERNAL_REVIEWING = auto()
     DONE = auto()
     ABORTED = auto()
     ERROR = auto()
@@ -48,10 +47,9 @@ _VALID_DECISIONS = ("PASS", "RETRY_PROBLEM", "RETRY_SOLUTION", "ABORT")
 class GenerationStateMachine:
     """驱动命题生成工作流的状态机。"""
 
-    def __init__(self, *, enable_external_review: bool = False):
+    def __init__(self):
         self._phase: Phase = Phase.INIT
         self._start_time: float = 0.0
-        self._enable_external_review = enable_external_review
 
     @property
     def phase(self) -> Phase:
@@ -73,6 +71,11 @@ class GenerationStateMachine:
         命中当前阶段上限时才熔断。另外 `retry_count`（总重试次数）
         仍设 2×MAX_RETRY_COUNT 的硬上限兜底，避免两阶段交替震荡。
 
+        日志策略（保留单一入口/出口日志，去除分支末尾重复打印）：
+          - 进入路由：一次 INFO，统一打印 decision + 三个计数器 + error_category
+          - 离开路由：一次 INFO/WARNING，按返回值分级（pass/pass_with_edits = INFO，
+            abort/end = WARNING，retry_* = INFO）
+
         返回值: "pass" | "pass_with_edits" | "retry_problem" | "retry_solution" | "abort" | "end"
         """
         decision = data.get("arbiter_decision", "RETRY_PROBLEM")
@@ -81,12 +84,21 @@ class GenerationStateMachine:
         total_retry = data.get("retry_count", prob_retry + sol_retry)
         error_cat = data.get("error_category", "fatal")
 
+        # 入口日志：一行覆盖全部决策上下文
+        logger.info(
+            "[router] decision=%s | error_category=%s | retry: problem=%d/%d solution=%d/%d total=%d/%d",
+            decision, error_cat,
+            prob_retry, MAX_RETRY_COUNT,
+            sol_retry, MAX_RETRY_COUNT,
+            total_retry, 2 * MAX_RETRY_COUNT,
+        )
+
         if decision == "PASS":
-            logger.info("[router] PASS → 进入后处理流水线")
+            logger.info("[router] → pass（进入后处理流水线）")
             return "pass"
 
         if decision == "ABORT":
-            logger.warning("[router] 仲裁判定 ABORT → 流程终止")
+            logger.warning("[router] → abort（仲裁判定 ABORT，流程终止）")
             return "abort"
 
         # 当前阶段是否已达上限
@@ -98,30 +110,34 @@ class GenerationStateMachine:
         total_exhausted = total_retry >= 2 * MAX_RETRY_COUNT
 
         if stage_exhausted or total_exhausted:
+            cap_reason = (
+                "stage_exhausted" if stage_exhausted and not total_exhausted
+                else "total_exhausted" if total_exhausted and not stage_exhausted
+                else "stage+total_exhausted"
+            )
             if error_cat == "style":
                 logger.info(
-                    "[router] 重试上限(problem=%d, solution=%d, total=%d)但仅有用语规范问题 → PASS_WITH_EDITS",
-                    prob_retry, sol_retry, total_retry,
+                    "[router] → pass_with_edits（达上限 [%s] 但 error_category=style，按"
+                    "有条件通过处理）",
+                    cap_reason,
                 )
                 return "pass_with_edits"
             logger.warning(
-                "[router] 达到最大重试次数 (problem=%d/%d, solution=%d/%d, total=%d) → 强制终止",
-                prob_retry, MAX_RETRY_COUNT, sol_retry, MAX_RETRY_COUNT, total_retry,
+                "[router] → end（达上限 [%s]，error_category=%s，强制终止）",
+                cap_reason, error_cat,
             )
             return "end"
 
         if decision == "RETRY_SOLUTION":
-            logger.info(
-                "[router] RETRY_SOLUTION → 回到解题生成 (solution_retry=%d)",
-                sol_retry,
-            )
+            logger.info("[router] → retry_solution（回到解题生成）")
             return "retry_solution"
 
-        # RETRY_PROBLEM 或未识别值兜底
-        logger.info(
-            "[router] RETRY_PROBLEM → 回到命题生成 (problem_retry=%d)",
-            prob_retry,
-        )
+        # RETRY_PROBLEM；未识别值理论上已在仲裁 Agent 内被收敛到 RETRY_PROBLEM
+        if decision != "RETRY_PROBLEM":
+            logger.warning(
+                "[router] 未识别 decision=%r，按 RETRY_PROBLEM 兜底", decision,
+            )
+        logger.info("[router] → retry_problem（回到命题生成）")
         return "retry_problem"
 
     # ------------------------------------------------------------------
@@ -203,11 +219,6 @@ class GenerationStateMachine:
             self._transition(Phase.TEMPLATE_FIXING)
             data.update(fix_template(data))
 
-            # ===== 外部审题（可选） =====
-            if self._enable_external_review:
-                self._transition(Phase.EXTERNAL_REVIEWING)
-                data = self._run_external_review(data)
-
             self._transition(Phase.DONE)
             elapsed = time.monotonic() - self._start_time
             logger.info("生成完成，总耗时 %.2f 秒", elapsed)
@@ -219,27 +230,7 @@ class GenerationStateMachine:
             logger.exception("生成流程出错 (已耗时 %.2f 秒)", elapsed)
             raise
 
-    def _run_external_review(self, data: WorkflowData) -> WorkflowData:
-        """调用 AI_Reviewer 外部审题并适配反馈。"""
-        from integration.ai_reviewer import run_ai_reviewer
-        from integration.feedback import adapt_feedback
-
-        review_result = run_ai_reviewer(data)
-        data.update(adapt_feedback(data, review_result))
-
-        ext_decision = data.get("external_decision", "")
-
-        if ext_decision == "accepted":
-            logger.info("[external] 外部审题通过")
-        elif ext_decision == "needs_revision":
-            logger.info("[external] 外部审题要求修订 → 将由调用方决定是否重跑")
-        elif ext_decision == "rejected":
-            logger.warning("[external] 外部审题拒绝")
-
-        return data
-
-
-def build_graph(*, enable_external_review: bool = False) -> GenerationStateMachine:
+def build_graph() -> GenerationStateMachine:
     """构建并返回工作流状态机。"""
     logger.info("[workflow] 工作流状态机构建完成")
-    return GenerationStateMachine(enable_external_review=enable_external_review)
+    return GenerationStateMachine()

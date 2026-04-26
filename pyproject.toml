@@ -14,13 +14,6 @@ dependencies = [
 [project.scripts]
 physics-generator = "app:_cli"
 
-# 可选外部依赖：`ai-reviewer` 是独立 CLI 工具（项目 CPHOS/AI_Reviewer），
-# 通过 subprocess 调用；未安装时 `src/integration/ai_reviewer.py` 会给出
-# 安装指引并跳过外部审题，主流程不受影响。
-# 此处保留占位以便未来若发布到 PyPI 时可通过 `uv pip install .[review]` 安装。
-[project.optional-dependencies]
-review = []
-
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0.0",
@@ -39,7 +32,6 @@ packages = [
     "src/spec",
     "src/agents",
     "src/latex",
-    "src/integration",
     "src/utils",
     "src/model",
     "src/prompts",

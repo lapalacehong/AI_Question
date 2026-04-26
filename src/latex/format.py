@@ -2,11 +2,15 @@
 格式化 Agent（小模型）。
 对占位符文本进行 LaTeX 排版，绝不触碰数学公式。
 内置占位符完整性校验：如果小模型篡改了占位符，触发兜底机制。
+
+数据归属（参见 model/state.py）：
+  - 读取：LaTeXOutput.tagged_text
+  - 写入：LaTeXOutput.formatted_text
 """
 import re
 import time
 
-from model.state import WorkflowData
+from model.state import WorkflowData, LaTeXOutput
 from model.stats import record
 from client import get_client, stream_chat
 from config.config import (
@@ -85,7 +89,7 @@ def _wrap_fallback_latex(tagged_text: str, *, title: str = "") -> str:
     return result
 
 
-def formatting_agent(data: WorkflowData) -> dict:
+def formatting_agent(data: WorkflowData) -> LaTeXOutput:
     """
     格式化节点：
     1. 发送给小模型排版

@@ -69,8 +69,8 @@ class TaskSpec(BaseModel):
         description="难度等级描述",
     )
     total_score: int = Field(
-        default=50, ge=20, le=80,
-        description="题目总分",
+        default=40, ge=20, le=80,
+        description="题目总分（CPhO 决赛单题主流分值为 40）",
     )
     difficulty_profile: DifficultyProfile = Field(
         default_factory=DifficultyProfile,

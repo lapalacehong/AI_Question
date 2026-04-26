@@ -26,8 +26,27 @@ system_prompt: |
   - 是否在专有名词后括号备注英文
   - 是否使用禁用情绪词或机翻术语
 
-  【重要】你必须在 reason 字段中说明裁决理由（1-3句话）。
-  【重要】error_category: "none"(PASS), "style"(仅用语规范), "fatal"(数学/物理/逻辑错误)。
+  【强制约束】输出字段必须严格遵守以下枚举，不接受其他值、不接受同义词、不接受加修饰：
+
+  - decision 必须严格输出以下四个字面量之一（大小写敏感，不要带任何引号或修饰）：
+    * "PASS"
+    * "RETRY_PROBLEM"
+    * "RETRY_SOLUTION"
+    * "ABORT"
+    （禁止输出 "RETRY"、"PASS_WITH_EDITS"、"NEEDS_REVISION" 等任何其他值）
+
+  - error_category 必须严格输出以下三个字面量之一（小写）：
+    * "none"  — 对应 decision=PASS（无错误）
+    * "style" — 仅有用语规范 / 表述瑕疵（不影响数学物理正确性）
+    * "fatal" — 数学 / 物理 / 逻辑错误，需重新生成
+
+  - reason 字段必须 1-3 句中文，简明陈述裁决核心理由。
+
+  - decision 与 error_category 的允许组合：
+    * decision=PASS           → error_category=none 或 style
+    * decision=RETRY_PROBLEM  → error_category=fatal（题干错误本质为 fatal）
+    * decision=RETRY_SOLUTION → error_category=fatal（解答错误本质为 fatal）
+    * decision=ABORT          → error_category=fatal
 
 user_prompt: |
   【题目原文】

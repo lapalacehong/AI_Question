@@ -2,10 +2,15 @@
 命题规划器。
 根据 TaskSpec（模式 + 难度目标 + 源材料）生成 planning_notes。
 planning_notes 作为后续命题和解题 Agent 的上下文输入。
+
+数据归属（参见 model/state.py）：
+  - 读取：TaskInput.{mode, topic, difficulty, total_score, difficulty_profile,
+    source_material}
+  - 写入：TaskInput.planning_notes
 """
 import time
 
-from model.state import WorkflowData
+from model.state import WorkflowData, TaskInput
 from model.stats import record
 from client import get_client, stream_chat
 from config.config import BIG_MODEL_NAME, BIG_MODEL_TEMPERATURE, BIG_MODEL_MAX_TOKENS, logger
@@ -26,8 +31,11 @@ def _build_difficulty_text(profile: dict) -> str:
     )
 
 
-def run_planning(data: WorkflowData) -> dict:
-    """规划节点：根据模式和输入生成 planning_notes。"""
+def run_planning(data: WorkflowData) -> TaskInput:
+    """规划节点：根据模式和输入生成 planning_notes。
+
+    返回 `TaskInput` 子集（仅 planning_notes），由状态机合并到流转字典。
+    """
     mode = data.get("mode", "topic_generation")
     logger.info("[planner] 进入命题规划节点 | mode=%s", mode)
 
@@ -39,7 +47,7 @@ def run_planning(data: WorkflowData) -> dict:
         "planning", f"user_prompt_{mode}",
         topic=data.get("topic", ""),
         difficulty=data.get("difficulty", ""),
-        total_score=str(data.get("total_score", 50)),
+        total_score=str(data.get("total_score", 40)),
         difficulty_text=difficulty_text,
         source_material=data.get("source_material", ""),
     )

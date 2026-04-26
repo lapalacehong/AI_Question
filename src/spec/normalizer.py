@@ -1,6 +1,10 @@
 """
 输入规格化器。
 将 CLI 参数或 JSON 文件统一转换为 TaskSpec → WorkflowData 初始状态。
+
+本模块负责"零号阶段"的工作：把外部输入（CLI / JSON）规格化为
+`TaskInput`（参见 model/state.py），并补齐其他阶段记录的空初始字段，
+组装出后续状态机可以直接 `update()` 的完整 `WorkflowData`。
 """
 from __future__ import annotations
 
@@ -8,7 +12,14 @@ import json
 from pathlib import Path
 
 from spec.task import TaskSpec, QuestionMode, DifficultyProfile
-from model.state import WorkflowData
+from model.state import (
+    WorkflowData,
+    TaskInput,
+    GenerationOutput,
+    ReviewOutput,
+    ArbitrationOutput,
+    LaTeXOutput,
+)
 from config.config import logger
 
 
@@ -35,7 +46,7 @@ def from_cli(
     *,
     topic: str = "",
     difficulty: str = "国家集训队",
-    total_score: int = 50,
+    total_score: int = 40,
     source_file: str | None = None,
     mode: str | None = None,
 ) -> WorkflowData:
@@ -92,9 +103,9 @@ def from_json(filepath: str) -> WorkflowData:
         topic=raw.get("topic", ""),
         source_material=raw.get("source_material", ""),
         difficulty=raw.get("difficulty", "国家集训队"),
-        total_score=raw.get("total_score", 50),
+        total_score=raw.get("total_score", 40),
         difficulty_profile=DifficultyProfile(**difficulty_profile) if difficulty_profile
-        else _infer_difficulty_profile(raw.get("total_score", 50)),
+        else _infer_difficulty_profile(raw.get("total_score", 40)),
     )
 
     logger.info("[normalizer] JSON 输入规格化完成 | mode=%s topic=%s",
@@ -104,9 +115,12 @@ def from_json(filepath: str) -> WorkflowData:
 
 
 def _spec_to_workflow_data(spec: TaskSpec) -> WorkflowData:
-    """将 TaskSpec 展开为 WorkflowData 初始状态。"""
-    return {
-        # 输入与规划
+    """将 TaskSpec 展开为 WorkflowData 初始状态。
+
+    分阶段拼装：每个阶段记录在此处给出"零值"初始状态，后续阶段 Agent
+    通过 `data.update(stage_output)` 写入自己阶段的实际产物。
+    """
+    initial_task: TaskInput = {
         "mode": spec.mode.value,
         "topic": spec.topic,
         "source_material": spec.source_material,
@@ -114,21 +128,28 @@ def _spec_to_workflow_data(spec: TaskSpec) -> WorkflowData:
         "total_score": spec.total_score,
         "difficulty_profile": spec.difficulty_profile.model_dump(),
         "planning_notes": "",
-        # 生成产物
+    }
+    initial_generation: GenerationOutput = {
         "title": "",
         "problem_text": "",
         "solution_text": "",
         "draft_content": "",
-        # 审核
+    }
+    initial_review: ReviewOutput = {
         "math_review": "",
         "physics_review": "",
         "structure_review": "",
-        # 仲裁
+    }
+    initial_arbitration: ArbitrationOutput = {
         "arbiter_decision": "",
         "arbiter_feedback": "",
         "arbiter_reason": "",
         "error_category": "",
-        # LaTeX 后处理
+        "retry_count": 0,
+        "problem_retry_count": 0,
+        "solution_retry_count": 0,
+    }
+    initial_latex: LaTeXOutput = {
         "formula_dict": {},
         "inline_dict": {},
         "figure_dict": {},
@@ -137,11 +158,12 @@ def _spec_to_workflow_data(spec: TaskSpec) -> WorkflowData:
         "final_latex": "",
         "template_report": "",
         "figure_descriptions": {},
-        # 外部审题
-        "external_feedback": "",
-        "external_decision": "",
-        # 元数据
-        "retry_count": 0,
-        "problem_retry_count": 0,
-        "solution_retry_count": 0,
     }
+
+    data: WorkflowData = {}
+    data.update(initial_task)
+    data.update(initial_generation)
+    data.update(initial_review)
+    data.update(initial_arbitration)
+    data.update(initial_latex)
+    return data
